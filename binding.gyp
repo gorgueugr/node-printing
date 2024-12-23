@@ -1,7 +1,7 @@
 {
   "targets": [
     {
-      "target_name": "node_printing",
+      "target_name": "nodeprinting",
       "sources": [
         "src/node_printer.hpp",
         

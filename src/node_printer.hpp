@@ -35,12 +35,12 @@ Napi::Value GetPrinters(const Napi::CallbackInfo& info);
 /**
  * Return default printer name, if null then default printer is not set
  */
-Napi::Value GetDefaultPrinterName(const Napi::CallbackInfo& info);
+Napi::String GetDefaultPrinterName(const Napi::CallbackInfo& info);
 
 /** Retrieve printer info and jobs
  * @param printer name String
  */
-Napi::Value GetPrinter(const Napi::CallbackInfo& info);
+Napi::Value GetOnePrinter(const Napi::CallbackInfo& info);
 
 /** Retrieve printer driver info
  * @param printer name String

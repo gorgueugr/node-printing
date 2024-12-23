@@ -1,6 +1,6 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
-const addon = require('./lib/addon.cjs');
+const printer = require('./lib/printer.cjs');
 
-console.log(addon.double(5)); // Debería imprimir 10
+console.log(printer.getDefaultPrinterName()); // Debería imprimir 10

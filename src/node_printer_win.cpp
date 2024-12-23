@@ -86,7 +86,7 @@ namespace
         STATUS_PRINTER_ADD("INITIALIZING", PRINTER_STATUS_INITIALIZING);
         STATUS_PRINTER_ADD("IO-ACTIVE", PRINTER_STATUS_IO_ACTIVE);
         STATUS_PRINTER_ADD("MANUAL-FEED", PRINTER_STATUS_MANUAL_FEED);
-        STATUS_PRINTER_ADD("NO-TONER", PRINTER_STATUS_NO_TONER);
+        STATUS_PRINTER_ADD("NO-TObPrinterNameNER", PRINTER_STATUS_NO_TONER);
         STATUS_PRINTER_ADD("NOT-AVAILABLE", PRINTER_STATUS_NOT_AVAILABLE);
         STATUS_PRINTER_ADD("OFFLINE", PRINTER_STATUS_OFFLINE);
         STATUS_PRINTER_ADD("OUT-OF-MEMORY", PRINTER_STATUS_OUT_OF_MEMORY);
@@ -197,7 +197,7 @@ inline std::wstring GetWStringFromNapiValue(const Napi::Value& value) {
 
 
 // N-API function implementations
-Napi::Value GetPrinter(const Napi::CallbackInfo& info) {
+Napi::Value GetOnePrinter(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
 
     // Check arguments
@@ -267,6 +267,39 @@ Napi::Value GetPrinter(const Napi::CallbackInfo& info) {
 
     return result;
 }
+
+
+
+// Function to get the default printer name
+Napi::String GetDefaultPrinterName(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+
+    // size in chars of the printer name
+    DWORD cSize = 0;
+    GetDefaultPrinterW(NULL, &cSize);
+
+    if (cSize == 0) {
+        return Napi::String::New(env, "");
+    }
+
+    MemValue<uint16_t> bPrinterName(cSize * sizeof(uint16_t));
+    BOOL res = GetDefaultPrinterW((LPWSTR)(bPrinterName.get()), &cSize);
+
+    if (!res) {
+        return Napi::String::New(env, "");
+    }
+
+    // Convert the wide character string to UTF-8
+    return WideToNapiString(env, reinterpret_cast<const wchar_t*>(bPrinterName.get()));
+
+    // return WideToNapiString(env, bPrinterName.get());
+    // std::string utf8Str(wideStr.begin(), wideStr.end());
+
+    // return Napi::String::New(env, utf8Str);
+}
+
+
+
 
 Napi::Value GetPrinters(const Napi::CallbackInfo &info)
 {
@@ -409,7 +442,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     
     exports.Set("getPrinters", Napi::Function::New(env, GetPrinters));
     exports.Set("getDefaultPrinterName", Napi::Function::New(env, GetDefaultPrinterName));
-    exports.Set("getPrinter", Napi::Function::New(env, GetPrinter));
+    exports.Set("getPrinter", Napi::Function::New(env, GetOnePrinter));
     // exports.Set("getPrinterDriverOptions", Napi::Function::New(env, GetPrinterDriverOptions));
     // exports.Set("getJob", Napi::Function::New(env, GetJob));
     // exports.Set("setJob", Napi::Function::New(env, SetJob));
@@ -422,7 +455,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 }
 
 
-NODE_API_MODULE(node_printer, Init)
+NODE_API_MODULE(nodeprinting, Init)
 
 
 
