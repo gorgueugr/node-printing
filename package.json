@@ -1,0 +1,18 @@
+{
+  "name": "printing",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "rebuild": "node-gyp rebuild",
+    "build": "node-gyp configure build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "node-addon-api": "^8.3.0"
+  }
+}
