@@ -51,7 +51,7 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo& info);
  *  @param printer name String
  *  @param job id Number
  */
-// Napi::Value GetJob(const Napi::CallbackInfo& info);
+Napi::Value GetOneJob(const Napi::CallbackInfo& info);
 
 /** Set job command. 
  * arguments:
@@ -69,15 +69,15 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo& info);
  *      "RETAIN"
  *      "RELEASE"
  */
-// Napi::Value SetJob(const Napi::CallbackInfo& info);
+Napi::Value SetOneJob(const Napi::CallbackInfo& info);
 
 /** Get supported print formats for printDirect. It depends on platform
  */
-// Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo& info);
+//  Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo& info);
 
 /** Get supported job commands for setJob method
  */
-// Napi::Value GetSupportedJobCommands(const Napi::CallbackInfo& info);
+Napi::Value GetSupportedJobCommands(const Napi::CallbackInfo& info);
 
 // Util class
 

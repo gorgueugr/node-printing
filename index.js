@@ -3,4 +3,14 @@ const require = createRequire(import.meta.url);
 
 const printer = require('./lib/printer.cjs');
 
-console.log(printer.getDefaultPrinterName()); // Debería imprimir 10
+const defaultPrinterName = printer.getDefaultPrinterName();
+
+console.log(defaultPrinterName);
+
+console.log(printer.getPrinters());
+
+console.log(printer.getSupportedJobCommands());
+
+console.log(printer.getSupportedPrintFormats());
+
+console.log(printer.getJob(defaultPrinterName, 1));
