@@ -329,42 +329,6 @@ Napi::Array GetPrinters(const Napi::CallbackInfo &info)
     }
 
     return result;
-
-    // PRINTER_INFO_2W *printer = printers.get();
-
-    // for (DWORD i = 0; i < printers_size; ++i, ++printer)
-    // {
-    //     Napi::Object printerObj = Napi::Object::New(env);
-
-    //     if (printer->pPrinterName && *printer->pPrinterName != L'\0')
-    //     {
-    //         printerObj.Set("name", Napi::String::New(env, (char16_t *)printer->pPrinterName));
-    //     }
-
-    //     if (printer->pServerName && *printer->pServerName != L'\0')
-    //     {
-    //         printerObj.Set("serverName", Napi::String::New(env, (char16_t *)printer->pServerName));
-    //     }
-
-    //     // Status array
-    //     Napi::Array statusArray = Napi::Array::New(env);
-    //     int statusIndex = 0;
-
-    //     for (const auto &status : getStatusMap())
-    //     {
-    //         if (printer->Status & status.second)
-    //         {
-    //             statusArray.Set(statusIndex++, Napi::String::New(env, status.first));
-    //         }
-    //     }
-
-    //     printerObj.Set("status", statusArray);
-    //     printerObj.Set("priority", Napi::Number::New(env, printer->Priority));
-
-    //     result.Set(i, printerObj);
-    // }
-
-    // return result;
 }
 
 Napi::Value PrintDirect(const Napi::CallbackInfo &info)
@@ -638,7 +602,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     exports.Set("getDefaultPrinterName", Napi::Function::New(env, GetDefaultPrinterName));
     exports.Set("getPrinter", Napi::Function::New(env, GetOnePrinter));
     // exports.Set("getPrinterDriverOptions", Napi::Function::New(env, GetPrinterDriverOptions));
-    exports.Set("getJob", Napi::Function::New(env, GetOneJob));
+    // exports.Set("getJob", Napi::Function::New(env, GetOneJob));
     // exports.Set("setJob", Napi::Function::New(env, SetOneJob));
     // exports.Set("printDirect", Napi::Function::New(env, PrintDirect));
     // exports.Set("printFile", Napi::Function::New(env, PrintFile));
