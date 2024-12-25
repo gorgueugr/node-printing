@@ -217,6 +217,45 @@ inline std::wstring GetWStringFromNapiValue(const Napi::Value &value)
     return std::wstring(temp.begin(), temp.end());
 }
 
+void ParsePrinterObject(PrinterInfo &printerInfo, Napi::Object &resultPrinter)
+{
+
+    Napi::Env env = resultPrinter.Env();
+
+    resultPrinter.Set("name", WideToNapiString(env, printerInfo.name));
+    resultPrinter.Set("server", WideToNapiString(env, printerInfo.server));
+    resultPrinter.Set("shareName", WideToNapiString(env, printerInfo.shareName));
+    resultPrinter.Set("portName", WideToNapiString(env, printerInfo.portName));
+    resultPrinter.Set("driverName", WideToNapiString(env, printerInfo.driverName));
+    resultPrinter.Set("location", WideToNapiString(env, printerInfo.location));
+    resultPrinter.Set("comment", WideToNapiString(env, printerInfo.comment));
+    resultPrinter.Set("status", Napi::Number::New(env, printerInfo.status));
+
+    Napi::Array statusArray = Napi::Array::New(env, printerInfo.statusArray.size());
+
+    for (int i = 0; i < printerInfo.statusArray.size(); ++i)
+    {
+        statusArray[i] = WideToNapiString(env, printerInfo.statusArray[i]);
+    }
+
+    resultPrinter.Set("statusArray", statusArray);
+
+    resultPrinter.Set("attributes", Napi::Number::New(env, printerInfo.attributes));
+    Napi::Array attributeArray = Napi::Array::New(env, printerInfo.attributeArray.size());
+
+    for (int i = 0; i < printerInfo.attributeArray.size(); ++i)
+    {
+        attributeArray[i] = WideToNapiString(env, printerInfo.attributeArray[i]);
+    }
+    resultPrinter.Set("attributeArray", attributeArray);
+
+    resultPrinter.Set("averagePPM", Napi::Number::New(env, printerInfo.averagePPM));
+    resultPrinter.Set("cJobs", Napi::Number::New(env, printerInfo.cJobs));
+    resultPrinter.Set("defaultPriority", Napi::Number::New(env, printerInfo.defaultPriority));
+    resultPrinter.Set("startTime", Napi::Number::New(env, printerInfo.startTime));
+    resultPrinter.Set("untilTime", Napi::Number::New(env, printerInfo.untilTime));
+}
+
 // N-API function implementations
 Napi::Value GetOnePrinter(const Napi::CallbackInfo &info)
 {
@@ -251,38 +290,7 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo &info)
     }
 
     Napi::Object resultPrinter = Napi::Object::New(env);
-    resultPrinter.Set("name", WideToNapiString(env, printerInfo.name));
-    resultPrinter.Set("server", WideToNapiString(env, printerInfo.server));
-    resultPrinter.Set("shareName", WideToNapiString(env, printerInfo.shareName));
-    resultPrinter.Set("portName", WideToNapiString(env, printerInfo.portName));
-    resultPrinter.Set("driverName", WideToNapiString(env, printerInfo.driverName));
-    resultPrinter.Set("location", WideToNapiString(env, printerInfo.location));
-    resultPrinter.Set("comment", WideToNapiString(env, printerInfo.comment));
-    resultPrinter.Set("status", Napi::Number::New(env, printerInfo.status));
-
-    Napi::Array statusArray = Napi::Array::New(env, printerInfo.statusArray.size());
-
-    for (int i = 0; i < printerInfo.statusArray.size(); ++i)
-    {
-        statusArray[i] = WideToNapiString(env, printerInfo.statusArray[i]);
-    }
-
-    resultPrinter.Set("statusArray", statusArray);
-
-    resultPrinter.Set("attributes", Napi::Number::New(env, printerInfo.attributes));
-    Napi::Array attributeArray = Napi::Array::New(env, printerInfo.attributeArray.size());
-
-    for (int i = 0; i < printerInfo.attributeArray.size(); ++i)
-    {
-        attributeArray[i] = WideToNapiString(env, printerInfo.attributeArray[i]);
-    }
-    resultPrinter.Set("attributeArray", attributeArray);
-
-    resultPrinter.Set("averagePPM", Napi::Number::New(env, printerInfo.averagePPM));
-    resultPrinter.Set("cJobs", Napi::Number::New(env, printerInfo.cJobs));
-    resultPrinter.Set("defaultPriority", Napi::Number::New(env, printerInfo.defaultPriority));
-    resultPrinter.Set("startTime", Napi::Number::New(env, printerInfo.startTime));
-    resultPrinter.Set("untilTime", Napi::Number::New(env, printerInfo.untilTime));
+    ParsePrinterObject(printerInfo, resultPrinter);
 
     return resultPrinter;
 }
@@ -298,68 +306,65 @@ Napi::String GetDefaultPrinterName(const Napi::CallbackInfo &info)
     return WideToNapiString(env, defaultPrinterName);
 }
 
-Napi::Value GetPrinters(const Napi::CallbackInfo &info)
+Napi::Array GetPrinters(const Napi::CallbackInfo &info)
 {
     Napi::Env env = info.Env();
 
-    DWORD printers_size = 0;
-    DWORD printers_size_bytes = 0, dummyBytes = 0;
-    DWORD flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
-
-    // Get required buffer size
-    EnumPrintersW(flags, NULL, 2, NULL, 0, &printers_size_bytes, &printers_size);
-
-    MemValue<PRINTER_INFO_2W> printers(printers_size_bytes);
-    if (!printers)
+    PrinterManager *printerManager = new PrinterManager();
+    std::vector<PrinterInfo> printersInfo;
+    ErrorMessage *errorMessage = printerManager->getPrinters(printersInfo);
+    if (errorMessage != NULL)
     {
-        throw Napi::Error::New(env, "Failed to allocate memory for printers");
+        Napi::Error::New(env, (std::string)*errorMessage).ThrowAsJavaScriptException();
+        return Napi::Array::New(env, 0);
     }
 
-    BOOL bError = EnumPrintersW(flags, NULL, 2, (LPBYTE)(printers.get()),
-                                printers_size_bytes, &dummyBytes, &printers_size);
-
-    if (!bError)
-    {
-        std::string error = "EnumPrinters error: " + GetLastErrorMessage();
-        throw Napi::Error::New(env, error);
-    }
-
-    Napi::Array result = Napi::Array::New(env, printers_size);
-    PRINTER_INFO_2W *printer = printers.get();
-
-    for (DWORD i = 0; i < printers_size; ++i, ++printer)
+    Napi::Array result = Napi::Array::New(env, printersInfo.size());
+    for (int i = 0; i < printersInfo.size(); ++i)
     {
         Napi::Object printerObj = Napi::Object::New(env);
+        ParsePrinterObject(printersInfo[i], printerObj);
 
-        if (printer->pPrinterName && *printer->pPrinterName != L'\0')
-        {
-            printerObj.Set("name", Napi::String::New(env, (char16_t *)printer->pPrinterName));
-        }
-
-        if (printer->pServerName && *printer->pServerName != L'\0')
-        {
-            printerObj.Set("serverName", Napi::String::New(env, (char16_t *)printer->pServerName));
-        }
-
-        // Status array
-        Napi::Array statusArray = Napi::Array::New(env);
-        int statusIndex = 0;
-
-        for (const auto &status : getStatusMap())
-        {
-            if (printer->Status & status.second)
-            {
-                statusArray.Set(statusIndex++, Napi::String::New(env, status.first));
-            }
-        }
-
-        printerObj.Set("status", statusArray);
-        printerObj.Set("priority", Napi::Number::New(env, printer->Priority));
-
-        result.Set(i, printerObj);
+        result[i] = printerObj;
     }
 
     return result;
+
+    // PRINTER_INFO_2W *printer = printers.get();
+
+    // for (DWORD i = 0; i < printers_size; ++i, ++printer)
+    // {
+    //     Napi::Object printerObj = Napi::Object::New(env);
+
+    //     if (printer->pPrinterName && *printer->pPrinterName != L'\0')
+    //     {
+    //         printerObj.Set("name", Napi::String::New(env, (char16_t *)printer->pPrinterName));
+    //     }
+
+    //     if (printer->pServerName && *printer->pServerName != L'\0')
+    //     {
+    //         printerObj.Set("serverName", Napi::String::New(env, (char16_t *)printer->pServerName));
+    //     }
+
+    //     // Status array
+    //     Napi::Array statusArray = Napi::Array::New(env);
+    //     int statusIndex = 0;
+
+    //     for (const auto &status : getStatusMap())
+    //     {
+    //         if (printer->Status & status.second)
+    //         {
+    //             statusArray.Set(statusIndex++, Napi::String::New(env, status.first));
+    //         }
+    //     }
+
+    //     printerObj.Set("status", statusArray);
+    //     printerObj.Set("priority", Napi::Number::New(env, printer->Priority));
+
+    //     result.Set(i, printerObj);
+    // }
+
+    // return result;
 }
 
 Napi::Value PrintDirect(const Napi::CallbackInfo &info)
@@ -629,7 +634,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
 {
     // Set methods
 
-    // exports.Set("getPrinters", Napi::Function::New(env, GetPrinters));
+    exports.Set("getPrinters", Napi::Function::New(env, GetPrinters));
     exports.Set("getDefaultPrinterName", Napi::Function::New(env, GetDefaultPrinterName));
     exports.Set("getPrinter", Napi::Function::New(env, GetOnePrinter));
     // exports.Set("getPrinterDriverOptions", Napi::Function::New(env, GetPrinterDriverOptions));

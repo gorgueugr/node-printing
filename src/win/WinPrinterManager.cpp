@@ -253,6 +253,26 @@ std::vector<std::string> getAttributeArray(DWORD attributes)
     return result;
 }
 
+void ParsePrinterObject(PRINTER_INFO_2W *printer, PrinterInfo &printerInfo)
+{
+    printerInfo.name = LPWSTRToString(printer->pPrinterName);
+    printerInfo.server = LPWSTRToString(printer->pServerName);
+    printerInfo.shareName = LPWSTRToString(printer->pShareName);
+    printerInfo.portName = LPWSTRToString(printer->pPortName);
+    printerInfo.driverName = LPWSTRToString(printer->pDriverName);
+    printerInfo.location = LPWSTRToString(printer->pLocation);
+    printerInfo.comment = LPWSTRToString(printer->pComment);
+    printerInfo.status = printer->Status;
+    printerInfo.statusArray = getStatusArray(printer->Status);
+    printerInfo.attributes = printer->Attributes;
+    printerInfo.attributeArray = getAttributeArray(printer->Attributes);
+    printerInfo.averagePPM = printer->AveragePPM;
+    printerInfo.cJobs = printer->cJobs;
+    printerInfo.defaultPriority = printer->DefaultPriority;
+    printerInfo.startTime = printer->StartTime;
+    printerInfo.untilTime = printer->UntilTime;
+}
+
 ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &printerInfo)
 {
 
@@ -283,22 +303,45 @@ ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &print
         return &errorMsg;
     }
 
-    printerInfo.name = LPWSTRToString(printer->pPrinterName);
-    printerInfo.server = LPWSTRToString(printer->pServerName);
-    printerInfo.shareName = LPWSTRToString(printer->pShareName);
-    printerInfo.portName = LPWSTRToString(printer->pPortName);
-    printerInfo.driverName = LPWSTRToString(printer->pDriverName);
-    printerInfo.location = LPWSTRToString(printer->pLocation);
-    printerInfo.comment = LPWSTRToString(printer->pComment);
-    printerInfo.status = printer->Status;
-    printerInfo.statusArray = getStatusArray(printer->Status);
-    printerInfo.attributes = printer->Attributes;
-    printerInfo.attributeArray = getAttributeArray(printer->Attributes);
-    printerInfo.averagePPM = printer->AveragePPM;
-    printerInfo.cJobs = printer->cJobs;
-    printerInfo.defaultPriority = printer->DefaultPriority;
-    printerInfo.startTime = printer->StartTime;
-    printerInfo.untilTime = printer->UntilTime;
+    ParsePrinterObject(printer.get(), printerInfo);
+
+    return NULL;
+}
+
+ErrorMessage *PrinterManager::getPrinters(std::vector<PrinterInfo> &printersInfo)
+{
+
+    DWORD printers_size = 0;
+    DWORD printers_size_bytes = 0, dummyBytes = 0;
+    DWORD flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+
+    // Get required buffer size
+    EnumPrintersW(flags, NULL, 2, NULL, 0, &printers_size_bytes, &printers_size);
+
+    MemValue<PRINTER_INFO_2W> printers(printers_size_bytes);
+    if (!printers)
+    {
+        static ErrorMessage errorMsg = "Failed to allocate memory for printers";
+        return &errorMsg;
+    }
+
+    BOOL bError = EnumPrintersW(flags, NULL, 2, (LPBYTE)(printers.get()),
+                                printers_size_bytes, &dummyBytes, &printers_size);
+
+    if (!bError)
+    {
+        static ErrorMessage errorMsg = "EnumPrinters Error ";
+        return &errorMsg;
+    }
+
+    PRINTER_INFO_2W *printer = printers.get();
+
+    for (DWORD i = 0; i < printers_size; ++i, ++printer)
+    {
+        PrinterInfo printerInfo;
+        ParsePrinterObject(printer, printerInfo);
+        printersInfo.push_back(printerInfo);
+    }
 
     return NULL;
 }
