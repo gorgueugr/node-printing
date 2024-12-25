@@ -355,47 +355,62 @@ Napi::Value PrintDirect(const Napi::CallbackInfo &info)
         throw Napi::Error::New(env, "First argument must be a string or Buffer");
     }
 
-    std::wstring printerName = GetWStringFromNapiValue(info[1]);
-    std::wstring docName = GetWStringFromNapiValue(info[2]);
-    std::wstring type = GetWStringFromNapiValue(info[3]);
+    std::wstring printerNameWide = GetWStringFromNapiValue(info[1]);
+    std::wstring docNameWide = GetWStringFromNapiValue(info[2]);
+    std::wstring typeWide = GetWStringFromNapiValue(info[3]);
 
-    PrinterHandle printerHandle((LPWSTR)printerName.c_str());
+    std::string docName = std::string(docNameWide.begin(), docNameWide.end());
+    std::string type = std::string(typeWide.begin(), typeWide.end());
 
-    if (!printerHandle)
+    PrinterManager *printerManager = new PrinterManager();
+    ErrorMessage *errorMessage = printerManager->printDirect(printerNameWide, docName, type, data);
+    if (errorMessage != NULL)
     {
-        std::string error = "PrinterHandle error: " + GetLastErrorMessage();
-        throw Napi::Error::New(env, error);
+        Napi::Error::New(env, (std::string)*errorMessage).ThrowAsJavaScriptException();
+        return env.Null();
     }
+    int jobId = 55;
+    // std::wstring printerName = GetWStringFromNapiValue(info[1]);
+    // std::wstring docName = GetWStringFromNapiValue(info[2]);
+    // std::wstring type = GetWStringFromNapiValue(info[3]);
 
-    DOC_INFO_1W DocInfo;
-    DocInfo.pDocName = (LPWSTR)docName.c_str();
-    DocInfo.pOutputFile = NULL;
-    DocInfo.pDatatype = (LPWSTR)type.c_str();
+    // PrinterHandle printerHandle((LPWSTR)printerName.c_str());
 
-    DWORD jobId = StartDocPrinterW(*printerHandle, 1, (LPBYTE)&DocInfo);
-    if (jobId == 0)
-    {
-        std::string error = "StartDocPrinter error: " + GetLastErrorMessage();
-        throw Napi::Error::New(env, error);
-    }
+    // if (!printerHandle)
+    // {
+    //     std::string error = "PrinterHandle error: " + GetLastErrorMessage();
+    //     throw Napi::Error::New(env, error);
+    // }
 
-    if (!StartPagePrinter(*printerHandle))
-    {
-        std::string error = "StartPagePrinter error: " + GetLastErrorMessage();
-        throw Napi::Error::New(env, error);
-    }
+    // DOC_INFO_1W DocInfo;
+    // DocInfo.pDocName = (LPWSTR)docName.c_str();
+    // DocInfo.pOutputFile = NULL;
+    // DocInfo.pDatatype = (LPWSTR)type.c_str();
 
-    DWORD bytesWritten = 0;
-    BOOL success = WritePrinter(*printerHandle, (LPVOID)data.c_str(),
-                                (DWORD)data.size(), &bytesWritten);
+    // DWORD jobId = StartDocPrinterW(*printerHandle, 1, (LPBYTE)&DocInfo);
+    // if (jobId == 0)
+    // {
+    //     std::string error = "StartDocPrinter error: " + GetLastErrorMessage();
+    //     throw Napi::Error::New(env, error);
+    // }
 
-    EndPagePrinter(*printerHandle);
-    EndDocPrinter(*printerHandle);
+    // if (!StartPagePrinter(*printerHandle))
+    // {
+    //     std::string error = "StartPagePrinter error: " + GetLastErrorMessage();
+    //     throw Napi::Error::New(env, error);
+    // }
 
-    if (!success || bytesWritten != data.size())
-    {
-        throw Napi::Error::New(env, "Failed to write all data to printer");
-    }
+    // DWORD bytesWritten = 0;
+    // BOOL success = WritePrinter(*printerHandle, (LPVOID)data.c_str(),
+    //                             (DWORD)data.size(), &bytesWritten);
+
+    // EndPagePrinter(*printerHandle);
+    // EndDocPrinter(*printerHandle);
+
+    // if (!success || bytesWritten != data.size())
+    // {
+    //     throw Napi::Error::New(env, "Failed to write all data to printer");
+    // }
 
     return Napi::Number::New(env, jobId);
 }
@@ -604,7 +619,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     // exports.Set("getPrinterDriverOptions", Napi::Function::New(env, GetPrinterDriverOptions));
     // exports.Set("getJob", Napi::Function::New(env, GetOneJob));
     // exports.Set("setJob", Napi::Function::New(env, SetOneJob));
-    // exports.Set("printDirect", Napi::Function::New(env, PrintDirect));
+    exports.Set("printDirect", Napi::Function::New(env, PrintDirect));
     // exports.Set("printFile", Napi::Function::New(env, PrintFile));
     // exports.Set("getSupportedPrintFormats", Napi::Function::New(env, GetSupportedPrintFormats));
     // exports.Set("getSupportedJobCommands", Napi::Function::New(env, GetSupportedJobCommands));

@@ -77,6 +77,7 @@ public:
     ErrorMessage *getOneJob(PrinterName name, int jobId, JobInfo &jobInfo);
     ErrorMessage *getOnePrinter(PrinterName name, PrinterInfo &printerInfo);
     ErrorMessage *getPrinters(std::vector<PrinterInfo> &printersInfo);
+    ErrorMessage *printDirect(PrinterName name, std::string docName, std::string type, std::string data);
 };
 
 #endif

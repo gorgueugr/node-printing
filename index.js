@@ -11,7 +11,12 @@ console.log(printer.getPrinters());
 
 // console.log(printer.getSupportedJobCommands());
 
-console.log(printer.getPrinter(defaultPrinterName));
+const printerName = "Microsoft Print to PDF";
+
+console.log(printer.getPrinter(printerName));
+
+const result = printer.printDirect('Hello world!', printerName, 'test.txt', 'RAW');
+console.log(result);
 
 // //console.log(printer.getSupportedPrintFormats());
 

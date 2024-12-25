@@ -345,3 +345,51 @@ ErrorMessage *PrinterManager::getPrinters(std::vector<PrinterInfo> &printersInfo
 
     return NULL;
 }
+
+ErrorMessage *PrinterManager::printDirect(PrinterName name, std::string docName, std::string type, std::string data)
+{
+
+    PrinterHandle printerHandle((LPWSTR)name.c_str());
+
+    if (!printerHandle)
+    {
+        static ErrorMessage errorMsg = "Could not open printer ";
+        return &errorMsg;
+    }
+
+    std::wstring docNameWide(docName.begin(), docName.end());
+    std::wstring typeWide(type.begin(), type.end());
+
+    DOC_INFO_1W DocInfo;
+    DocInfo.pDocName = (LPWSTR)docNameWide.c_str();
+    DocInfo.pOutputFile = NULL;
+    DocInfo.pDatatype = (LPWSTR)typeWide.c_str();
+
+    DWORD jobId = StartDocPrinterW(*printerHandle, 1, (LPBYTE)&DocInfo);
+    if (jobId == 0)
+    {
+        static ErrorMessage errorMsg = "StartDocPrinter error: ";
+        return &errorMsg;
+    }
+
+    if (!StartPagePrinter(*printerHandle))
+    {
+        static ErrorMessage errorMsg = "StartPagePrinter error: ";
+        return &errorMsg;
+    }
+
+    DWORD bytesWritten = 0;
+    BOOL success = WritePrinter(*printerHandle, (LPVOID)data.c_str(),
+                                (DWORD)data.size(), &bytesWritten);
+
+    EndPagePrinter(*printerHandle);
+    EndDocPrinter(*printerHandle);
+
+    if (!success || bytesWritten != data.size())
+    {
+        static ErrorMessage errorMsg = "Failed to write all data to printer";
+        return &errorMsg;
+    }
+
+    return NULL;
+}
