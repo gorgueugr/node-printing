@@ -70,6 +70,87 @@ std::string LPWSTRToString(const LPWSTR wstr)
     return strTo;
 }
 
+typedef std::map<std::string, DWORD> StatusMapType;
+
+// Status maps implementation
+const StatusMapType &getStatusMap()
+{
+    static StatusMapType result;
+    if (!result.empty())
+    {
+        return result;
+    }
+
+#define STATUS_PRINTER_ADD(value, type) result.insert(std::make_pair(value, type))
+    STATUS_PRINTER_ADD("BUSY", PRINTER_STATUS_BUSY);
+    STATUS_PRINTER_ADD("DOOR-OPEN", PRINTER_STATUS_DOOR_OPEN);
+    STATUS_PRINTER_ADD("ERROR", PRINTER_STATUS_ERROR);
+    STATUS_PRINTER_ADD("INITIALIZING", PRINTER_STATUS_INITIALIZING);
+    STATUS_PRINTER_ADD("IO-ACTIVE", PRINTER_STATUS_IO_ACTIVE);
+    STATUS_PRINTER_ADD("MANUAL-FEED", PRINTER_STATUS_MANUAL_FEED);
+    STATUS_PRINTER_ADD("NO-TObPrinterNameNER", PRINTER_STATUS_NO_TONER);
+    STATUS_PRINTER_ADD("NOT-AVAILABLE", PRINTER_STATUS_NOT_AVAILABLE);
+    STATUS_PRINTER_ADD("OFFLINE", PRINTER_STATUS_OFFLINE);
+    STATUS_PRINTER_ADD("OUT-OF-MEMORY", PRINTER_STATUS_OUT_OF_MEMORY);
+    STATUS_PRINTER_ADD("OUTPUT-BIN-FULL", PRINTER_STATUS_OUTPUT_BIN_FULL);
+    STATUS_PRINTER_ADD("PAGE-PUNT", PRINTER_STATUS_PAGE_PUNT);
+    STATUS_PRINTER_ADD("PAPER-JAM", PRINTER_STATUS_PAPER_JAM);
+    STATUS_PRINTER_ADD("PAPER-OUT", PRINTER_STATUS_PAPER_OUT);
+    STATUS_PRINTER_ADD("PAPER-PROBLEM", PRINTER_STATUS_PAPER_PROBLEM);
+    STATUS_PRINTER_ADD("PAUSED", PRINTER_STATUS_PAUSED);
+    STATUS_PRINTER_ADD("PENDING-DELETION", PRINTER_STATUS_PENDING_DELETION);
+    STATUS_PRINTER_ADD("POWER-SAVE", PRINTER_STATUS_POWER_SAVE);
+    STATUS_PRINTER_ADD("PRINTING", PRINTER_STATUS_PRINTING);
+    STATUS_PRINTER_ADD("PROCESSING", PRINTER_STATUS_PROCESSING);
+    STATUS_PRINTER_ADD("SERVER-UNKNOWN", PRINTER_STATUS_SERVER_UNKNOWN);
+    STATUS_PRINTER_ADD("TONER-LOW", PRINTER_STATUS_TONER_LOW);
+    STATUS_PRINTER_ADD("USER-INTERVENTION", PRINTER_STATUS_USER_INTERVENTION);
+    STATUS_PRINTER_ADD("WAITING", PRINTER_STATUS_WAITING);
+    STATUS_PRINTER_ADD("WARMING-UP", PRINTER_STATUS_WARMING_UP);
+#undef STATUS_PRINTER_ADD
+    return result;
+}
+
+const StatusMapType &getAttributeMap()
+{
+    static StatusMapType result;
+    if (!result.empty())
+    {
+        return result;
+    }
+    // add only first time
+#define ATTRIBUTE_PRINTER_ADD(value, type) result.insert(std::make_pair(value, type))
+    ATTRIBUTE_PRINTER_ADD("DIRECT", PRINTER_ATTRIBUTE_DIRECT);
+    ATTRIBUTE_PRINTER_ADD("DO-COMPLETE-FIRST", PRINTER_ATTRIBUTE_DO_COMPLETE_FIRST);
+    ATTRIBUTE_PRINTER_ADD("ENABLE-DEVQ", PRINTER_ATTRIBUTE_ENABLE_DEVQ);
+    ATTRIBUTE_PRINTER_ADD("HIDDEN", PRINTER_ATTRIBUTE_HIDDEN);
+    ATTRIBUTE_PRINTER_ADD("KEEPPRINTEDJOBS", PRINTER_ATTRIBUTE_KEEPPRINTEDJOBS);
+    ATTRIBUTE_PRINTER_ADD("LOCAL", PRINTER_ATTRIBUTE_LOCAL);
+    ATTRIBUTE_PRINTER_ADD("NETWORK", PRINTER_ATTRIBUTE_NETWORK);
+    ATTRIBUTE_PRINTER_ADD("PUBLISHED", PRINTER_ATTRIBUTE_PUBLISHED);
+    ATTRIBUTE_PRINTER_ADD("QUEUED", PRINTER_ATTRIBUTE_QUEUED);
+    ATTRIBUTE_PRINTER_ADD("RAW-ONLY", PRINTER_ATTRIBUTE_RAW_ONLY);
+    ATTRIBUTE_PRINTER_ADD("SHARED", PRINTER_ATTRIBUTE_SHARED);
+    ATTRIBUTE_PRINTER_ADD("OFFLINE", PRINTER_ATTRIBUTE_WORK_OFFLINE);
+    // XP
+#ifdef PRINTER_ATTRIBUTE_FAX
+    ATTRIBUTE_PRINTER_ADD("FAX", PRINTER_ATTRIBUTE_FAX);
+#endif
+    // vista
+#ifdef PRINTER_ATTRIBUTE_FRIENDLY_NAME
+    ATTRIBUTE_PRINTER_ADD("FRIENDLY-NAME", PRINTER_ATTRIBUTE_FRIENDLY_NAME);
+    ATTRIBUTE_PRINTER_ADD("MACHINE", PRINTER_ATTRIBUTE_MACHINE);
+    ATTRIBUTE_PRINTER_ADD("PUSHED-USER", PRINTER_ATTRIBUTE_PUSHED_USER);
+    ATTRIBUTE_PRINTER_ADD("PUSHED-MACHINE", PRINTER_ATTRIBUTE_PUSHED_MACHINE);
+#endif
+    // server 2003
+#ifdef PRINTER_ATTRIBUTE_TS
+    ATTRIBUTE_PRINTER_ADD("TS", PRINTER_ATTRIBUTE_TS);
+#endif
+#undef ATTRIBUTE_PRINTER_ADD
+    return result;
+}
+
 PrinterName PrinterManager::getDefaultPrinterName()
 {
 
@@ -78,21 +159,21 @@ PrinterName PrinterManager::getDefaultPrinterName()
 
     if (cSize == 0)
     {
-        return NULL;
+        throw std::runtime_error("Error could not get default printer name");
     }
 
     MemValue<uint16_t> bPrinterName(cSize * sizeof(uint16_t));
 
     if (bPrinterName == NULL)
     {
-        return NULL;
+        throw std::runtime_error("Error on allocating memory for printer name");
     }
 
     BOOL res = GetDefaultPrinterW((LPWSTR)(bPrinterName.get()), &cSize);
 
     if (!res)
     {
-        return NULL;
+        throw std::runtime_error("Error on GetDefaultPrinterW");
     }
 
     std::string result = LPWSTRToString(reinterpret_cast<const wchar_t *>(bPrinterName.get()));
@@ -142,6 +223,36 @@ ErrorMessage *PrinterManager::getOneJob(PrinterName name, int jobId, JobInfo &jo
     return NULL;
 }
 
+std::vector<std::string> getStatusArray(DWORD status)
+{
+    std::vector<std::string> result;
+
+    for (const auto &statusMap : getStatusMap())
+    {
+        if (status & statusMap.second)
+        {
+            result.push_back(statusMap.first);
+        }
+    }
+
+    return result;
+}
+
+std::vector<std::string> getAttributeArray(DWORD attributes)
+{
+    std::vector<std::string> result;
+
+    for (const auto &attributeMap : getAttributeMap())
+    {
+        if (attributes & attributeMap.second)
+        {
+            result.push_back(attributeMap.first);
+        }
+    }
+
+    return result;
+}
+
 ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &printerInfo)
 {
 
@@ -180,7 +291,14 @@ ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &print
     printerInfo.location = LPWSTRToString(printer->pLocation);
     printerInfo.comment = LPWSTRToString(printer->pComment);
     printerInfo.status = printer->Status;
+    printerInfo.statusArray = getStatusArray(printer->Status);
     printerInfo.attributes = printer->Attributes;
+    printerInfo.attributeArray = getAttributeArray(printer->Attributes);
+    printerInfo.averagePPM = printer->AveragePPM;
+    printerInfo.cJobs = printer->cJobs;
+    printerInfo.defaultPriority = printer->DefaultPriority;
+    printerInfo.startTime = printer->StartTime;
+    printerInfo.untilTime = printer->UntilTime;
 
     return NULL;
 }

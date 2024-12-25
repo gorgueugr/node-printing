@@ -2,6 +2,7 @@
 #define PRINTER_MANAGER_HPP
 
 #include <string>
+#include <vector>
 
 typedef std::wstring PrinterName;
 typedef std::string ErrorMessage;
@@ -28,8 +29,15 @@ struct PrinterInfo
     std::string driverName;
     std::string location;
     std::string comment;
+    std::vector<std::string> statusArray;
     int status;
     int attributes;
+    std::vector<std::string> attributeArray;
+    int averagePPM;
+    int cJobs;
+    int defaultPriority;
+    int startTime;
+    int untilTime;
 };
 
 template <typename Type>

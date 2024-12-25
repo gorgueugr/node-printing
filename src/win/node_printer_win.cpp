@@ -239,7 +239,6 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo &info)
 
     // Convert JS string to wide string
     std::wstring printerName = GetWStringFromNapiValue(info[0]);
-    // std::string printerName(wideName.begin(), wideName.end());
 
     PrinterManager *printerManager = new PrinterManager();
     PrinterInfo printerInfo;
@@ -250,6 +249,7 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo &info)
         Napi::Error::New(env, (std::string)*errorMessage).ThrowAsJavaScriptException();
         return env.Null();
     }
+
     Napi::Object resultPrinter = Napi::Object::New(env);
     resultPrinter.Set("name", WideToNapiString(env, printerInfo.name));
     resultPrinter.Set("server", WideToNapiString(env, printerInfo.server));
@@ -259,63 +259,32 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo &info)
     resultPrinter.Set("location", WideToNapiString(env, printerInfo.location));
     resultPrinter.Set("comment", WideToNapiString(env, printerInfo.comment));
     resultPrinter.Set("status", Napi::Number::New(env, printerInfo.status));
+
+    Napi::Array statusArray = Napi::Array::New(env, printerInfo.statusArray.size());
+
+    for (int i = 0; i < printerInfo.statusArray.size(); ++i)
+    {
+        statusArray[i] = WideToNapiString(env, printerInfo.statusArray[i]);
+    }
+
+    resultPrinter.Set("statusArray", statusArray);
+
     resultPrinter.Set("attributes", Napi::Number::New(env, printerInfo.attributes));
+    Napi::Array attributeArray = Napi::Array::New(env, printerInfo.attributeArray.size());
+
+    for (int i = 0; i < printerInfo.attributeArray.size(); ++i)
+    {
+        attributeArray[i] = WideToNapiString(env, printerInfo.attributeArray[i]);
+    }
+    resultPrinter.Set("attributeArray", attributeArray);
+
+    resultPrinter.Set("averagePPM", Napi::Number::New(env, printerInfo.averagePPM));
+    resultPrinter.Set("cJobs", Napi::Number::New(env, printerInfo.cJobs));
+    resultPrinter.Set("defaultPriority", Napi::Number::New(env, printerInfo.defaultPriority));
+    resultPrinter.Set("startTime", Napi::Number::New(env, printerInfo.startTime));
+    resultPrinter.Set("untilTime", Napi::Number::New(env, printerInfo.untilTime));
 
     return resultPrinter;
-
-    // // Open printer handle
-    // HANDLE printerHandle;
-    // if (!OpenPrinterW((LPWSTR)printername.c_str(), &printerHandle, NULL))
-    // {
-    //     std::string error_str = "error on OpenPrinter: " + std::to_string(GetLastError());
-    //     Napi::Error::New(env, error_str).ThrowAsJavaScriptException();
-    //     return env.Null();
-    // }
-
-    // // Get required buffer size
-    // DWORD printers_size_bytes = 0;
-    // GetPrinterW(printerHandle, 2, NULL, 0, &printers_size_bytes);
-
-    // // Allocate memory for printer info
-    // PRINTER_INFO_2W *printer = (PRINTER_INFO_2W *)malloc(printers_size_bytes);
-    // if (!printer)
-    // {
-    //     ClosePrinter(printerHandle);
-    //     Napi::Error::New(env, "Error allocating memory for printer info")
-    //         .ThrowAsJavaScriptException();
-    //     return env.Null();
-    // }
-
-    // // Get printer info
-    // BOOL bOK = GetPrinterW(printerHandle, 2, (LPBYTE)printer, printers_size_bytes, &printers_size_bytes);
-    // if (!bOK)
-    // {
-    //     free(printer);
-    //     ClosePrinter(printerHandle);
-    //     std::string error_str = "Error on GetPrinter: " + std::to_string(GetLastError());
-    //     Napi::Error::New(env, error_str).ThrowAsJavaScriptException();
-    //     return env.Null();
-    // }
-
-    // // Create result object
-    // // Napi::Object result = Napi::Object::New(env);
-
-    // // Parse printer info
-    // result.Set("name", WideToNapiString(env, printer->pPrinterName));
-    // result.Set("server", WideToNapiString(env, printer->pServerName));
-    // result.Set("shareName", WideToNapiString(env, printer->pShareName));
-    // result.Set("portName", WideToNapiString(env, printer->pPortName));
-    // result.Set("driverName", WideToNapiString(env, printer->pDriverName));
-    // result.Set("location", WideToNapiString(env, printer->pLocation));
-    // result.Set("comment", WideToNapiString(env, printer->pComment));
-    // result.Set("status", Napi::Number::New(env, printer->Status));
-    // result.Set("attributes", Napi::Number::New(env, printer->Attributes));
-
-    // // Clean up
-    // free(printer);
-    // ClosePrinter(printerHandle);
-
-    // return result;
 }
 
 Napi::String GetDefaultPrinterName(const Napi::CallbackInfo &info)
