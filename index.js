@@ -7,10 +7,12 @@ const defaultPrinterName = printer.getDefaultPrinterName();
 
 console.log(defaultPrinterName);
 
-console.log(printer.getPrinters());
+// console.log(printer.getPrinters());
 
-console.log(printer.getSupportedJobCommands());
+// console.log(printer.getSupportedJobCommands());
 
-console.log(printer.getSupportedPrintFormats());
+// console.log(printer.getPrinter(defaultPrinterName));
 
-console.log(printer.getJob(defaultPrinterName, 1));
+// //console.log(printer.getSupportedPrintFormats());
+
+// console.log(printer.getJob(defaultPrinterName, 1));

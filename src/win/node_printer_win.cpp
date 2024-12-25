@@ -1,4 +1,6 @@
-#include "node_printer.hpp"
+#include "../node_printer.hpp"
+
+#include "WinPrinterManager.hpp"
 
 #include <napi.h>
 #include <windows.h>
@@ -14,36 +16,6 @@
 namespace
 {
     typedef std::map<std::string, DWORD> StatusMapType;
-
-    // Memory value class management to avoid memory leak
-    template <typename Type>
-    class MemValue
-    {
-    public:
-        MemValue(const DWORD iSizeKbytes)
-        {
-            _value = (Type *)malloc(iSizeKbytes);
-        }
-
-        ~MemValue()
-        {
-            free();
-        }
-
-        Type *get() { return _value; }
-        operator bool() { return (_value != NULL); }
-
-    protected:
-        Type *_value;
-        virtual void free()
-        {
-            if (_value != NULL)
-            {
-                ::free(_value);
-                _value = NULL;
-            }
-        }
-    };
 
     struct PrinterHandle
     {
@@ -109,10 +81,10 @@ namespace
         return result;
     }
 
-   const StatusMapType& getJobCommandMap()
+    const StatusMapType &getJobCommandMap()
     {
         static StatusMapType result;
-        if(!result.empty())
+        if (!result.empty())
         {
             return result;
         }
@@ -134,7 +106,6 @@ namespace
 #undef COMMAND_JOB_ADD
         return result;
     }
-
 
     void ParseJobObject(JOB_INFO_2W *job, Napi::Object &result)
     {
@@ -207,34 +178,53 @@ namespace
     }
 }
 
-Napi::String WideToNapiString(Napi::Env env, const wchar_t* wstr) {
+Napi::String WideToNapiString(Napi::Env env, const wchar_t *wstr)
+{
+    if (wstr == NULL)
+    {
+        return Napi::String::New(env, "");
+    }
+    if (wstr[0] == L'\0')
+    {
+        return Napi::String::New(env, "");
+    }
+
     int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
     std::string strTo(size_needed, 0);
     WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &strTo[0], size_needed, NULL, NULL);
     return Napi::String::New(env, strTo);
 }
 
-inline std::wstring GetWStringFromNapiValue(const Napi::Value& value) {
-    if (!value.IsString()) {
+Napi::String WideToNapiString(Napi::Env env, std::string str)
+{
+    return Napi::String::New(env, str.c_str());
+}
+
+inline std::wstring GetWStringFromNapiValue(const Napi::Value &value)
+{
+    if (!value.IsString())
+    {
         throw Napi::TypeError::New(value.Env(), "String expected");
     }
     std::u16string temp = value.As<Napi::String>().Utf16Value();
     return std::wstring(temp.begin(), temp.end());
 }
 
-
 // N-API function implementations
-Napi::Value GetOnePrinter(const Napi::CallbackInfo& info) {
+Napi::Value GetOnePrinter(const Napi::CallbackInfo &info)
+{
     Napi::Env env = info.Env();
 
     // Check arguments
-    if (info.Length() < 1) {
+    if (info.Length() < 1)
+    {
         Napi::TypeError::New(env, "Wrong number of arguments")
             .ThrowAsJavaScriptException();
         return env.Null();
     }
 
-    if (!info[0].IsString()) {
+    if (!info[0].IsString())
+    {
         Napi::TypeError::New(env, "String expected")
             .ThrowAsJavaScriptException();
         return env.Null();
@@ -245,7 +235,8 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo& info) {
 
     // Open printer handle
     HANDLE printerHandle;
-    if (!OpenPrinterW((LPWSTR)printername.c_str(), &printerHandle, NULL)) {
+    if (!OpenPrinterW((LPWSTR)printername.c_str(), &printerHandle, NULL))
+    {
         std::string error_str = "error on OpenPrinter: " + std::to_string(GetLastError());
         Napi::Error::New(env, error_str).ThrowAsJavaScriptException();
         return env.Null();
@@ -254,10 +245,11 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo& info) {
     // Get required buffer size
     DWORD printers_size_bytes = 0;
     GetPrinterW(printerHandle, 2, NULL, 0, &printers_size_bytes);
-    
+
     // Allocate memory for printer info
-    PRINTER_INFO_2W* printer = (PRINTER_INFO_2W*)malloc(printers_size_bytes);
-    if (!printer) {
+    PRINTER_INFO_2W *printer = (PRINTER_INFO_2W *)malloc(printers_size_bytes);
+    if (!printer)
+    {
         ClosePrinter(printerHandle);
         Napi::Error::New(env, "Error allocating memory for printer info")
             .ThrowAsJavaScriptException();
@@ -266,7 +258,8 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo& info) {
 
     // Get printer info
     BOOL bOK = GetPrinterW(printerHandle, 2, (LPBYTE)printer, printers_size_bytes, &printers_size_bytes);
-    if (!bOK) {
+    if (!bOK)
+    {
         free(printer);
         ClosePrinter(printerHandle);
         std::string error_str = "Error on GetPrinter: " + std::to_string(GetLastError());
@@ -295,34 +288,17 @@ Napi::Value GetOnePrinter(const Napi::CallbackInfo& info) {
     return result;
 }
 
-
-
 // Function to get the default printer name
-Napi::String GetDefaultPrinterName(const Napi::CallbackInfo& info) {
+Napi::String GetDefaultPrinterName(const Napi::CallbackInfo &info)
+{
     Napi::Env env = info.Env();
 
-    // size in chars of the printer name
-    DWORD cSize = 0;
-    GetDefaultPrinterW(NULL, &cSize);
+    WinPrinterManager printerManager = WinPrinterManager();
 
-    if (cSize == 0) {
-        return Napi::String::New(env, "");
-    }
+    std::string defaultPrinterName = printerManager.getDefaultPrinterName();
 
-    MemValue<uint16_t> bPrinterName(cSize * sizeof(uint16_t));
-    BOOL res = GetDefaultPrinterW((LPWSTR)(bPrinterName.get()), &cSize);
-
-    if (!res) {
-        return Napi::String::New(env, "");
-    }
-
-    // Convert the wide character string to UTF-8
-    return WideToNapiString(env, reinterpret_cast<const wchar_t*>(bPrinterName.get()));
-
+    return WideToNapiString(env, defaultPrinterName);
 }
-
-
-
 
 Napi::Value GetPrinters(const Napi::CallbackInfo &info)
 {
@@ -415,7 +391,7 @@ Napi::Value PrintDirect(const Napi::CallbackInfo &info)
     std::wstring printerName = GetWStringFromNapiValue(info[1]);
     std::wstring docName = GetWStringFromNapiValue(info[2]);
     std::wstring type = GetWStringFromNapiValue(info[3]);
-    
+
     PrinterHandle printerHandle((LPWSTR)printerName.c_str());
 
     if (!printerHandle)
@@ -457,8 +433,8 @@ Napi::Value PrintDirect(const Napi::CallbackInfo &info)
     return Napi::Number::New(env, jobId);
 }
 
-
-Napi::Value GetSupportedJobCommands(const Napi::CallbackInfo& info) {
+Napi::Value GetSupportedJobCommands(const Napi::CallbackInfo &info)
+{
     Napi::Env env = info.Env();
 
     StatusMapType jobCommandMap = getJobCommandMap();
@@ -466,38 +442,42 @@ Napi::Value GetSupportedJobCommands(const Napi::CallbackInfo& info) {
     Napi::Array resultArray = Napi::Array::New(env, mapSize);
 
     size_t index = 0;
-    for (const auto& command : jobCommandMap) {
+    for (const auto &command : jobCommandMap)
+    {
         resultArray.Set(index++, Napi::String::New(env, command.first));
     }
 
     return resultArray;
 }
 
-
-
-Napi::Value GetOneJob(const Napi::CallbackInfo& info) {
+Napi::Value GetOneJob(const Napi::CallbackInfo &info)
+{
     Napi::Env env = info.Env();
 
     // Check arguments
-    if (info.Length() < 2) {
+    if (info.Length() < 2)
+    {
         Napi::TypeError::New(env, "Expected two arguments").ThrowAsJavaScriptException();
         return env.Null();
     }
-    if (!info[0].IsString() || !info[1].IsNumber()) {
+    if (!info[0].IsString() || !info[1].IsNumber())
+    {
         Napi::TypeError::New(env, "Expected a string and a number").ThrowAsJavaScriptException();
         return env.Null();
     }
 
     std::wstring printerName = GetWStringFromNapiValue(info[0]);
     int jobId = info[1].As<Napi::Number>().Int32Value();
-    if (jobId < 0) {
+    if (jobId < 0)
+    {
         Napi::Error::New(env, "Wrong job number").ThrowAsJavaScriptException();
         return env.Null();
     }
 
     // Open a handle to the printer
     PrinterHandle printerHandle((LPWSTR)printerName.c_str());
-    if (!printerHandle) {
+    if (!printerHandle)
+    {
         // std::string errorStr = "error on PrinterHandle: " + GetLastErrorMessage();
         // Napi::Error::New(env, errorStr).ThrowAsJavaScriptException();
         return env.Null();
@@ -507,14 +487,16 @@ Napi::Value GetOneJob(const Napi::CallbackInfo& info) {
     DWORD sizeBytes = 0, dummyBytes = 0;
     GetJobW(*printerHandle, static_cast<DWORD>(jobId), 2, NULL, sizeBytes, &sizeBytes);
     MemValue<JOB_INFO_2W> job(sizeBytes);
-    if (!job) {
+    if (!job)
+    {
         Napi::Error::New(env, "Error on allocating memory for printers").ThrowAsJavaScriptException();
         return env.Null();
     }
 
     // Get the job info
     BOOL bOK = GetJobW(*printerHandle, static_cast<DWORD>(jobId), 2, (LPBYTE)job.get(), sizeBytes, &dummyBytes);
-    if (!bOK) {
+    if (!bOK)
+    {
         // std::string errorStr = "Error on GetJob. Wrong job id or it was deleted: " + GetLastErrorMessage();
         // Napi::Error::New(env, errorStr).ThrowAsJavaScriptException();
         return env.Null();
@@ -527,31 +509,34 @@ Napi::Value GetOneJob(const Napi::CallbackInfo& info) {
     return resultPrinterJob;
 }
 
-
-
-Napi::Value SetOneJob(const Napi::CallbackInfo& info) {
+Napi::Value SetOneJob(const Napi::CallbackInfo &info)
+{
     Napi::Env env = info.Env();
 
     // Check arguments
-    if (info.Length() < 3) {
+    if (info.Length() < 3)
+    {
         Napi::TypeError::New(env, "Expected three arguments").ThrowAsJavaScriptException();
         return env.Undefined();
     }
-    if (!info[0].IsString() || !info[1].IsNumber() || !info[2].IsString()) {
+    if (!info[0].IsString() || !info[1].IsNumber() || !info[2].IsString())
+    {
         Napi::TypeError::New(env, "Expected a string, a number, and a string").ThrowAsJavaScriptException();
         return env.Undefined();
     }
 
     std::wstring printerName = GetWStringFromNapiValue(info[0]);
     int jobId = info[1].As<Napi::Number>().Int32Value();
-    if (jobId < 0) {
+    if (jobId < 0)
+    {
         Napi::Error::New(env, "Wrong job number").ThrowAsJavaScriptException();
         return env.Undefined();
     }
-    
+
     std::string jobCommandStr = info[2].As<Napi::String>().Utf8Value();
     StatusMapType::const_iterator itJobCommand = getJobCommandMap().find(jobCommandStr);
-    if (itJobCommand == getJobCommandMap().end()) {
+    if (itJobCommand == getJobCommandMap().end())
+    {
         Napi::Error::New(env, "Wrong job command. Use getSupportedJobCommands to see the possible commands").ThrowAsJavaScriptException();
         return env.Undefined();
     }
@@ -559,7 +544,8 @@ Napi::Value SetOneJob(const Napi::CallbackInfo& info) {
 
     // Open a handle to the printer
     PrinterHandle printerHandle((LPWSTR)printerName.c_str());
-    if (!printerHandle) {
+    if (!printerHandle)
+    {
         std::string errorStr = "Error on PrinterHandle: " + GetLastErrorMessage();
         Napi::Error::New(env, errorStr).ThrowAsJavaScriptException();
         return env.Undefined();
@@ -570,7 +556,6 @@ Napi::Value SetOneJob(const Napi::CallbackInfo& info) {
 
     return Napi::Boolean::New(env, ok == TRUE);
 }
-
 
 // Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo& info) {
 //     Napi::Env env = info.Env();
@@ -618,30 +603,22 @@ Napi::Value SetOneJob(const Napi::CallbackInfo& info) {
 //     return result;
 // }
 
-
-
-
-
-Napi::Object Init(Napi::Env env, Napi::Object exports) {
+Napi::Object Init(Napi::Env env, Napi::Object exports)
+{
     // Set methods
 
-    
-    exports.Set("getPrinters", Napi::Function::New(env, GetPrinters));
+    // exports.Set("getPrinters", Napi::Function::New(env, GetPrinters));
     exports.Set("getDefaultPrinterName", Napi::Function::New(env, GetDefaultPrinterName));
-    exports.Set("getPrinter", Napi::Function::New(env, GetOnePrinter));
+    // exports.Set("getPrinter", Napi::Function::New(env, GetOnePrinter));
     // exports.Set("getPrinterDriverOptions", Napi::Function::New(env, GetPrinterDriverOptions));
-    exports.Set("getJob", Napi::Function::New(env, GetOneJob));
-    exports.Set("setJob", Napi::Function::New(env, SetOneJob));
+    // exports.Set("getJob", Napi::Function::New(env, GetOneJob));
+    // exports.Set("setJob", Napi::Function::New(env, SetOneJob));
     // exports.Set("printDirect", Napi::Function::New(env, PrintDirect));
     // exports.Set("printFile", Napi::Function::New(env, PrintFile));
     // exports.Set("getSupportedPrintFormats", Napi::Function::New(env, GetSupportedPrintFormats));
-    exports.Set("getSupportedJobCommands", Napi::Function::New(env, GetSupportedJobCommands));
-    
+    // exports.Set("getSupportedJobCommands", Napi::Function::New(env, GetSupportedJobCommands));
+
     return exports;
 }
 
-
 NODE_API_MODULE(nodeprinting, Init)
-
-
-
