@@ -11,7 +11,7 @@ console.log(defaultPrinterName);
 
 // console.log(printer.getSupportedJobCommands());
 
-// console.log(printer.getPrinter(defaultPrinterName));
+console.log(printer.getPrinter(defaultPrinterName));
 
 // //console.log(printer.getSupportedPrintFormats());
 

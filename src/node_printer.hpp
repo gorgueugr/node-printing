@@ -103,34 +103,6 @@ protected:
 };
 
 // Memory value class management to avoid memory leak
-template <typename Type>
-class MemValue
-{
-public:
-    MemValue(const DWORD iSizeKbytes)
-    {
-        _value = (Type *)malloc(iSizeKbytes);
-    }
-
-    ~MemValue()
-    {
-        free();
-    }
-
-    Type *get() { return _value; }
-    operator bool() { return (_value != NULL); }
-
-protected:
-    Type *_value;
-    virtual void free()
-    {
-        if (_value != NULL)
-        {
-            ::free(_value);
-            _value = NULL;
-        }
-    }
-};
 
 /**
  * Try to extract String or buffer from N-API value

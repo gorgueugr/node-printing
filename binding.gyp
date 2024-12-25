@@ -4,7 +4,7 @@
       "target_name": "nodeprinting",
       "sources": [
         "src/node_printer.hpp",
-        "src/win/WinPrinterManager.hpp",
+        "src/PrinterManager.hpp",
         "src/win/WinPrinterManager.cpp",
         "src/win/node_printer_win.cpp",
       ],
