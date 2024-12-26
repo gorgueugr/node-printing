@@ -362,14 +362,15 @@ Napi::Value PrintDirect(const Napi::CallbackInfo &info)
     std::string docName = std::string(docNameWide.begin(), docNameWide.end());
     std::string type = std::string(typeWide.begin(), typeWide.end());
 
+    int jobId = 0;
+
     PrinterManager *printerManager = new PrinterManager();
-    ErrorMessage *errorMessage = printerManager->printDirect(printerNameWide, docName, type, data);
+    ErrorMessage *errorMessage = printerManager->printDirect(printerNameWide, docName, type, data, jobId);
     if (errorMessage != NULL)
     {
         Napi::Error::New(env, (std::string)*errorMessage).ThrowAsJavaScriptException();
         return env.Null();
     }
-    int jobId = 55;
     // std::wstring printerName = GetWStringFromNapiValue(info[1]);
     // std::wstring docName = GetWStringFromNapiValue(info[2]);
     // std::wstring type = GetWStringFromNapiValue(info[3]);

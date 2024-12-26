@@ -1,4 +1,5 @@
 import { createRequire } from 'module';
+import fs from 'fs';
 const require = createRequire(import.meta.url);
 
 const printer = require('./lib/printer.cjs');
@@ -11,12 +12,19 @@ console.log(printer.getPrinters());
 
 // console.log(printer.getSupportedJobCommands());
 
-const printerName = "Microsoft Print to PDF";
+// const printerName = "Microsoft Print to PDF";
+const printerName = "WF-7830 Series(Red)";
+// const printerName = "Microsoft XPS Document Writer";
 
 console.log(printer.getPrinter(printerName));
 
-const result = printer.printDirect('Hello world!', printerName, 'test.txt', 'RAW');
-console.log(result);
+// const testPrint = fs.readFileSync('test.pcl');
+const testPrint = "Hola Mundo".repeat(100);
+
+console.log(testPrint);
+
+// const result = printer.printDirect(testPrint, printerName, 'test.PCL', 'RAW');
+// console.log(result);
 
 // //console.log(printer.getSupportedPrintFormats());
 

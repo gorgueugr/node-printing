@@ -53,23 +53,6 @@ std::string LPWSTRToString(const wchar_t *wstr)
     return strTo;
 }
 
-std::string LPWSTRToString(const LPWSTR wstr)
-{
-    if (wstr == NULL)
-    {
-        return std::string("");
-    }
-    if (wstr[0] == L'\0')
-    {
-        return std::string("");
-    }
-
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
-    std::string strTo(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &strTo[0], size_needed, NULL, NULL);
-    return strTo;
-}
-
 typedef std::map<std::string, DWORD> StatusMapType;
 
 // Status maps implementation
@@ -290,7 +273,8 @@ ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &print
     MemValue<PRINTER_INFO_2W> printer(sizeBytes);
     if (!printer)
     {
-        ClosePrinter(printerHandle);
+
+        // ClosePrinter(printerHandle);
         static ErrorMessage errorMsg = "Error on allocating memory for printer info";
         return &errorMsg;
     }
@@ -298,7 +282,7 @@ ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &print
     BOOL bOK = GetPrinterW(printerHandle, 2, (LPBYTE)printer.get(), sizeBytes, &dummyBytes);
     if (!bOK)
     {
-        ClosePrinter(printerHandle);
+        // ClosePrinter(printerHandle);
         static ErrorMessage errorMsg = "Error on GetPrinter. Wrong printer name or it was deleted";
         return &errorMsg;
     }
@@ -346,7 +330,7 @@ ErrorMessage *PrinterManager::getPrinters(std::vector<PrinterInfo> &printersInfo
     return NULL;
 }
 
-ErrorMessage *PrinterManager::printDirect(PrinterName name, std::string docName, std::string type, std::string data)
+ErrorMessage *PrinterManager::printDirect(PrinterName name, std::string docName, std::string type, std::string data, int &jobId)
 {
 
     PrinterHandle printerHandle((LPWSTR)name.c_str());
@@ -363,9 +347,11 @@ ErrorMessage *PrinterManager::printDirect(PrinterName name, std::string docName,
     DOC_INFO_1W DocInfo;
     DocInfo.pDocName = (LPWSTR)docNameWide.c_str();
     DocInfo.pOutputFile = NULL;
+    // RAW format: A data type consisting of PDL data that can be sent to a device without further processing.
+    // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rprn/e81cbc09-ab05-4a32-ae4a-8ec57b436c43#Appendix_A_211
     DocInfo.pDatatype = (LPWSTR)typeWide.c_str();
 
-    DWORD jobId = StartDocPrinterW(*printerHandle, 1, (LPBYTE)&DocInfo);
+    jobId = StartDocPrinterW(*printerHandle, 1, (LPBYTE)&DocInfo);
     if (jobId == 0)
     {
         static ErrorMessage errorMsg = "StartDocPrinter error: ";
@@ -393,3 +379,47 @@ ErrorMessage *PrinterManager::printDirect(PrinterName name, std::string docName,
 
     return NULL;
 }
+
+// ErrorMessage *GetSupportedPrintFormats(PrinterName name)
+// {
+
+//     int format_i = 0;
+//     LPTSTR name = NULL;
+//     DWORD numBytes = 0, processorsNum = 0;
+//     LPWSTR nullVal = NULL;
+
+//     // Check the amount of bytes required
+//     EnumPrintProcessorsW((LPWSTR)name.c_str(), nullVal, 1, (LPBYTE)(NULL), numBytes, &numBytes, &processorsNum);
+//     MemValue<_PRINTPROCESSOR_INFO_1W> processors(numBytes);
+
+//     // Retrieve processors
+//     BOOL isOK = EnumPrintProcessorsW(nullVal, nullVal, 1, (LPBYTE)(processors.get()), numBytes, &numBytes, &processorsNum);
+//     if (!isOK)
+//     {
+//         static ErrorMessage errorMsg = "Error on EnumPrintProcessorsW";
+//         return &errorMsg;
+//     }
+
+//     _PRINTPROCESSOR_INFO_1W *pProcessor = processors.get();
+//     for (DWORD processor_i = 0; processor_i < processorsNum; ++processor_i, ++pProcessor)
+//     {
+//         numBytes = 0;
+//         DWORD dataTypesNum = 0;
+//         EnumPrintProcessorDatatypesW(nullVal, pProcessor->pName, 1, (LPBYTE)(NULL), numBytes, &numBytes, &dataTypesNum);
+//         MemValue<_DATATYPES_INFO_1W> dataTypes(numBytes);
+//         isOK = EnumPrintProcessorDatatypesW(nullVal, pProcessor->pName, 1, (LPBYTE)(dataTypes.get()), numBytes, &numBytes, &dataTypesNum);
+//         if (!isOK)
+//         {
+//             static ErrorMessage errorMsg = "Error on EnumPrintProcessorDatatypesW";
+//             return &errorMsg;
+//         }
+
+//         _DATATYPES_INFO_1W *pDataType = dataTypes.get();
+//         for (DWORD j = 0; j < dataTypesNum; ++j, ++pDataType)
+//         {
+//             result.Set(format_i++, Napi::String::New(env, (char16_t *)(pDataType->pName)));
+//         }
+//     }
+
+//     return result;
+// }
