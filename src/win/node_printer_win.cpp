@@ -600,7 +600,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     exports.Set("printDirect", Napi::Function::New(env, PrintDirect));
     // exports.Set("printFile", Napi::Function::New(env, PrintFile));
     exports.Set("getSupportedPrintFormats", Napi::Function::New(env, GetSupportedPrintFormats));
-    // exports.Set("getSupportedJobCommands", Napi::Function::New(env, GetSupportedJobCommands));
+    exports.Set("getSupportedJobCommands", Napi::Function::New(env, GetSupportedJobCommands));
 
     return exports;
 }
