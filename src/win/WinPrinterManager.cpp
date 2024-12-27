@@ -380,46 +380,44 @@ ErrorMessage *PrinterManager::printDirect(PrinterName name, std::string docName,
     return NULL;
 }
 
-// ErrorMessage *GetSupportedPrintFormats(PrinterName name)
-// {
+ErrorMessage *PrinterManager::getSupportedPrintFormats(std::vector<std::string> &dataTypes)
+{
 
-//     int format_i = 0;
-//     LPTSTR name = NULL;
-//     DWORD numBytes = 0, processorsNum = 0;
-//     LPWSTR nullVal = NULL;
+    DWORD numBytes = 0, processorsNum = 0;
 
-//     // Check the amount of bytes required
-//     EnumPrintProcessorsW((LPWSTR)name.c_str(), nullVal, 1, (LPBYTE)(NULL), numBytes, &numBytes, &processorsNum);
-//     MemValue<_PRINTPROCESSOR_INFO_1W> processors(numBytes);
+    // Check the amount of bytes required
+    EnumPrintProcessorsW(NULL, NULL, 1, (LPBYTE)(NULL), numBytes, &numBytes, &processorsNum);
+    MemValue<_PRINTPROCESSOR_INFO_1W> processors(numBytes);
 
-//     // Retrieve processors
-//     BOOL isOK = EnumPrintProcessorsW(nullVal, nullVal, 1, (LPBYTE)(processors.get()), numBytes, &numBytes, &processorsNum);
-//     if (!isOK)
-//     {
-//         static ErrorMessage errorMsg = "Error on EnumPrintProcessorsW";
-//         return &errorMsg;
-//     }
+    // Retrieve processors
+    BOOL isOK = EnumPrintProcessorsW(NULL, NULL, 1, (LPBYTE)(processors.get()), numBytes, &numBytes, &processorsNum);
+    if (!isOK)
+    {
+        static ErrorMessage errorMsg = "Error on EnumPrintProcessorsW";
+        return &errorMsg;
+    }
 
-//     _PRINTPROCESSOR_INFO_1W *pProcessor = processors.get();
-//     for (DWORD processor_i = 0; processor_i < processorsNum; ++processor_i, ++pProcessor)
-//     {
-//         numBytes = 0;
-//         DWORD dataTypesNum = 0;
-//         EnumPrintProcessorDatatypesW(nullVal, pProcessor->pName, 1, (LPBYTE)(NULL), numBytes, &numBytes, &dataTypesNum);
-//         MemValue<_DATATYPES_INFO_1W> dataTypes(numBytes);
-//         isOK = EnumPrintProcessorDatatypesW(nullVal, pProcessor->pName, 1, (LPBYTE)(dataTypes.get()), numBytes, &numBytes, &dataTypesNum);
-//         if (!isOK)
-//         {
-//             static ErrorMessage errorMsg = "Error on EnumPrintProcessorDatatypesW";
-//             return &errorMsg;
-//         }
+    _PRINTPROCESSOR_INFO_1W *pProcessor = processors.get();
+    for (DWORD processor_i = 0; processor_i < processorsNum; ++processor_i, ++pProcessor)
+    {
+        numBytes = 0;
+        DWORD dataTypesNum = 0;
+        EnumPrintProcessorDatatypesW(NULL, pProcessor->pName, 1, (LPBYTE)(NULL), numBytes, &numBytes, &dataTypesNum);
+        MemValue<_DATATYPES_INFO_1W> dataTypesWin(numBytes);
+        isOK = EnumPrintProcessorDatatypesW(NULL, pProcessor->pName, 1, (LPBYTE)(dataTypesWin.get()), numBytes, &numBytes, &dataTypesNum);
+        
+        if (!isOK)
+        {
+            static ErrorMessage errorMsg = "Error on EnumPrintProcessorDatatypesW";
+            return &errorMsg;
+        }
 
-//         _DATATYPES_INFO_1W *pDataType = dataTypes.get();
-//         for (DWORD j = 0; j < dataTypesNum; ++j, ++pDataType)
-//         {
-//             result.Set(format_i++, Napi::String::New(env, (char16_t *)(pDataType->pName)));
-//         }
-//     }
+        _DATATYPES_INFO_1W *pDataType = dataTypesWin.get();
+        for (DWORD j = 0; j < dataTypesNum; ++j, ++pDataType)
+        {
+            dataTypes.push_back(LPWSTRToString(pDataType->pName));
+        }
+    }
 
-//     return result;
-// }
+    return NULL;
+}

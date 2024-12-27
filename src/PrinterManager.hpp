@@ -78,6 +78,8 @@ public:
     ErrorMessage *getOnePrinter(PrinterName name, PrinterInfo &printerInfo);
     ErrorMessage *getPrinters(std::vector<PrinterInfo> &printersInfo);
     ErrorMessage *printDirect(PrinterName name, std::string docName, std::string type, std::string data, int &jobId);
+    ErrorMessage *getSupportedPrintFormats(std::vector<std::string> &dataTypes);
+
 };
 
 #endif

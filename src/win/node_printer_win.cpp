@@ -564,51 +564,28 @@ Napi::Value SetOneJob(const Napi::CallbackInfo &info)
     return Napi::Boolean::New(env, ok == TRUE);
 }
 
-// Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo& info) {
-//     Napi::Env env = info.Env();
-//     DWORD numBytes = 0, processorsNum = 0;
-//     LPWSTR nullVal = NULL;
+Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    
+    PrinterManager *printerManager = new PrinterManager();
+    std::vector<std::string> dataTypes;
+    ErrorMessage *errorMessage = printerManager->getSupportedPrintFormats(dataTypes);
 
-//     // Determine the size needed for the processors
-//     EnumPrintProcessorsW(nullVal, nullVal, 1, NULL, numBytes, &numBytes, &processorsNum);
-//     MemValue<_PRINTPROCESSOR_INFO_1W> processors(numBytes);
+    if (errorMessage != NULL)
+    {
+        Napi::Error::New(env, (std::string)*errorMessage).ThrowAsJavaScriptException();
+        return env.Null();
+    }
 
-//     // Retrieve print processors
-//     BOOL isOK = EnumPrintProcessorsW(nullVal, nullVal, 1, (LPBYTE)processors.get(), numBytes, &numBytes, &processorsNum);
-//     if (!isOK) {
-//         std::string errorStr = "Error on EnumPrintProcessorsW: " + GetLastErrorMessage();
-//         Napi::Error::New(env, errorStr).ThrowAsJavaScriptException();
-//         return env.Null();
-//     }
 
-//     Napi::Array result = Napi::Array::New(env);
-//     int formatIndex = 0;
-//     _PRINTPROCESSOR_INFO_1W* pProcessor = processors.get();
+    Napi::Array result = Napi::Array::New(env, dataTypes.size());
+    for (int i = 0; i < dataTypes.size(); ++i)
+    {
+        result[i] = Napi::String::New(env, dataTypes[i].c_str());
+    }   
 
-//     for (DWORD processorIndex = 0; processorIndex < processorsNum; ++processorIndex, ++pProcessor) {
-//         numBytes = 0;
-//         DWORD dataTypesNum = 0;
-
-//         // Determine the size needed for the data types
-//         EnumPrintProcessorDatatypesW(nullVal, pProcessor->pName, 1, NULL, numBytes, &numBytes, &dataTypesNum);
-//         MemValue<_DATATYPES_INFO_1W> dataTypes(numBytes);
-
-//         // Retrieve print processor data types
-//         isOK = EnumPrintProcessorDatatypesW(nullVal, pProcessor->pName, 1, (LPBYTE)dataTypes.get(), numBytes, &numBytes, &dataTypesNum);
-//         if (!isOK) {
-//             std::string errorStr = "Error on EnumPrintProcessorDatatypesW: " + GetLastErrorMessage();
-//             Napi::Error::New(env, errorStr).ThrowAsJavaScriptException();
-//             return env.Null();
-//         }
-
-//         _DATATYPES_INFO_1W* pDataType = dataTypes.get();
-//         for (DWORD dataTypeIndex = 0; dataTypeIndex < dataTypesNum; ++dataTypeIndex, ++pDataType) {
-//             result.Set(formatIndex++, Napi::String::New(env, pDataType->pName));
-//         }
-//     }
-
-//     return result;
-// }
+    return result;
+}
 
 Napi::Object Init(Napi::Env env, Napi::Object exports)
 {
@@ -622,7 +599,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     // exports.Set("setJob", Napi::Function::New(env, SetOneJob));
     exports.Set("printDirect", Napi::Function::New(env, PrintDirect));
     // exports.Set("printFile", Napi::Function::New(env, PrintFile));
-    // exports.Set("getSupportedPrintFormats", Napi::Function::New(env, GetSupportedPrintFormats));
+    exports.Set("getSupportedPrintFormats", Napi::Function::New(env, GetSupportedPrintFormats));
     // exports.Set("getSupportedJobCommands", Napi::Function::New(env, GetSupportedJobCommands));
 
     return exports;
