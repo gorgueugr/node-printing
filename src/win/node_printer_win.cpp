@@ -89,7 +89,6 @@ namespace
         {
             return result;
         }
-        // add only first time
 #define COMMAND_JOB_ADD(value, type) result.insert(std::make_pair(value, type))
         COMMAND_JOB_ADD("CANCEL", JOB_CONTROL_CANCEL);
         COMMAND_JOB_ADD("PAUSE", JOB_CONTROL_PAUSE);
@@ -217,6 +216,16 @@ inline std::wstring GetWStringFromNapiValue(const Napi::Value &value)
     return std::wstring(temp.begin(), temp.end());
 }
 
+void AddResultStringArray(Napi::Env env, Napi::Object &result, const std::vector<std::string> &array, const std::string &name)
+{
+    Napi::Array arrayResult = Napi::Array::New(env, array.size());
+    for (int i = 0; i < array.size(); ++i)
+    {
+        arrayResult[i] = WideToNapiString(env, array[i]);
+    }
+    result.Set(name, arrayResult);
+}
+
 void ParsePrinterObject(PrinterInfo &printerInfo, Napi::Object &resultPrinter)
 {
 
@@ -231,23 +240,8 @@ void ParsePrinterObject(PrinterInfo &printerInfo, Napi::Object &resultPrinter)
     resultPrinter.Set("comment", WideToNapiString(env, printerInfo.comment));
     resultPrinter.Set("status", Napi::Number::New(env, printerInfo.status));
 
-    Napi::Array statusArray = Napi::Array::New(env, printerInfo.statusArray.size());
-
-    for (int i = 0; i < printerInfo.statusArray.size(); ++i)
-    {
-        statusArray[i] = WideToNapiString(env, printerInfo.statusArray[i]);
-    }
-
-    resultPrinter.Set("statusArray", statusArray);
-
-    resultPrinter.Set("attributes", Napi::Number::New(env, printerInfo.attributes));
-    Napi::Array attributeArray = Napi::Array::New(env, printerInfo.attributeArray.size());
-
-    for (int i = 0; i < printerInfo.attributeArray.size(); ++i)
-    {
-        attributeArray[i] = WideToNapiString(env, printerInfo.attributeArray[i]);
-    }
-    resultPrinter.Set("attributeArray", attributeArray);
+    AddResultStringArray(env, resultPrinter, printerInfo.statusArray, std::string("statusArray"));
+    AddResultStringArray(env, resultPrinter, printerInfo.attributeArray, std::string("attributeArray"));
 
     resultPrinter.Set("averagePPM", Napi::Number::New(env, printerInfo.averagePPM));
     resultPrinter.Set("cJobs", Napi::Number::New(env, printerInfo.cJobs));
@@ -564,9 +558,10 @@ Napi::Value SetOneJob(const Napi::CallbackInfo &info)
     return Napi::Boolean::New(env, ok == TRUE);
 }
 
-Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo& info) {
+Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo &info)
+{
     Napi::Env env = info.Env();
-    
+
     PrinterManager *printerManager = new PrinterManager();
     std::vector<std::string> dataTypes;
     ErrorMessage *errorMessage = printerManager->getSupportedPrintFormats(dataTypes);
@@ -577,12 +572,50 @@ Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo& info) {
         return env.Null();
     }
 
-
     Napi::Array result = Napi::Array::New(env, dataTypes.size());
     for (int i = 0; i < dataTypes.size(); ++i)
     {
         result[i] = Napi::String::New(env, dataTypes[i].c_str());
-    }   
+    }
+
+    return result;
+}
+
+Napi::Value GetPrinterDevMode(const Napi::CallbackInfo &info)
+{
+    Napi::Env env = info.Env();
+
+    // Check arguments
+    if (info.Length() < 1)
+    {
+        Napi::TypeError::New(env, "Expected one arguments").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+    if (!info[0].IsString())
+    {
+        Napi::TypeError::New(env, "Expected a string").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+
+    std::wstring printerNameWide = GetWStringFromNapiValue(info[0]);
+
+    PrinterManager *printerManager = new PrinterManager();
+    PrinterDevMode printerDevMode;
+    ErrorMessage *errorMessage = printerManager->getPrinterDevMode(printerNameWide, printerDevMode);
+
+    if (errorMessage != NULL)
+    {
+        Napi::Error::New(env, (std::string)*errorMessage).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    Napi::Object result = Napi::Object::New(env);
+    result.Set("deviceName", WideToNapiString(env, printerDevMode.deviceName));
+    result.Set("paperSize", WideToNapiString(env, printerDevMode.paperSize));
+    result.Set("orientation", WideToNapiString(env, orientation_str[printerDevMode.orientation]));
+    result.Set("duplex", WideToNapiString(env, duplex_str[printerDevMode.duplex]));
+    result.Set("copies", Napi::Number::New(env, printerDevMode.copies));
+    result.Set("color", WideToNapiString(env, color_str[printerDevMode.color]));
 
     return result;
 }
@@ -594,11 +627,12 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     exports.Set("getPrinters", Napi::Function::New(env, GetPrinters));
     exports.Set("getDefaultPrinterName", Napi::Function::New(env, GetDefaultPrinterName));
     exports.Set("getPrinter", Napi::Function::New(env, GetOnePrinter));
-    // exports.Set("getPrinterDriverOptions", Napi::Function::New(env, GetPrinterDriverOptions));
-    // exports.Set("getJob", Napi::Function::New(env, GetOneJob));
+    //  exports.Set("getPrinterDriverOptions", Napi::Function::New(env, GetPrinterDriverOptions));
+    exports.Set("getJob", Napi::Function::New(env, GetOneJob));
     // exports.Set("setJob", Napi::Function::New(env, SetOneJob));
     exports.Set("printDirect", Napi::Function::New(env, PrintDirect));
     // exports.Set("printFile", Napi::Function::New(env, PrintFile));
+    exports.Set("getPrinterDevMode", Napi::Function::New(env, GetPrinterDevMode));
     exports.Set("getSupportedPrintFormats", Napi::Function::New(env, GetSupportedPrintFormats));
     exports.Set("getSupportedJobCommands", Napi::Function::New(env, GetSupportedJobCommands));
 
