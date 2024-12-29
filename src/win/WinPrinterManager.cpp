@@ -50,6 +50,7 @@ std::string LPWSTRToString(const wchar_t *wstr)
     int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
     std::string strTo(size_needed, 0);
     WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &strTo[0], size_needed, NULL, NULL);
+
     return strTo;
 }
 
@@ -466,7 +467,7 @@ ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &print
     }
 
     DWORD sizeBytes = 0, dummyBytes = 0;
-    GetPrinter(printerHandle, 2, NULL, 0, &sizeBytes);
+    GetPrinterW(printerHandle, 2, NULL, 0, &sizeBytes);
 
     MemValue<PRINTER_INFO_2W> printer(sizeBytes);
     if (!printer)
@@ -476,7 +477,7 @@ ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &print
         return &errorMsg;
     }
 
-    BOOL bOK = GetPrinter(printerHandle, 2, (LPBYTE)printer.get(), sizeBytes, &dummyBytes);
+    BOOL bOK = GetPrinterW(printerHandle, 2, (LPBYTE)printer.get(), sizeBytes, &dummyBytes);
     if (!bOK)
     {
         static ErrorMessage errorMsg = "Error on GetPrinter. Wrong printer name or it was deleted";
@@ -639,7 +640,7 @@ ErrorMessage *PrinterManager::getPrinterDevMode(const std::wstring &printerName,
     }
 
     // Allocate memory for printer info
-    MemValue<PRINTER_INFO_2> pInfo(needed);
+    MemValue<PRINTER_INFO_2W> pInfo(needed);
 
     if (!pInfo)
     {
