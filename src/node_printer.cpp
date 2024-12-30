@@ -3,10 +3,6 @@
 #include "PrinterManager.hpp"
 
 #include <napi.h>
-#include <windows.h>
-#include <Winspool.h>
-#include <Wingdi.h>
-#pragma comment(lib, "Winspool.lib")
 
 #include <string>
 #include <map>
@@ -16,71 +12,7 @@
 
 namespace
 {
-    typedef std::map<std::string, DWORD> StatusMapType;
-
-    struct PrinterHandle
-    {
-        PrinterHandle(LPWSTR iPrinterName)
-        {
-            _ok = OpenPrinterW(iPrinterName, &_printer, NULL);
-        }
-
-        ~PrinterHandle()
-        {
-            if (_ok)
-            {
-                ClosePrinter(_printer);
-            }
-        }
-
-        operator HANDLE() { return _printer; }
-        operator bool() { return (!!_ok); }
-        HANDLE &operator*() { return _printer; }
-        HANDLE *operator->() { return &_printer; }
-        const HANDLE &operator->() const { return _printer; }
-
-        HANDLE _printer;
-        BOOL _ok;
-    };
-
-    // Status maps implementation
-    const StatusMapType &getStatusMap()
-    {
-        static StatusMapType result;
-        if (!result.empty())
-        {
-            return result;
-        }
-
-#define STATUS_PRINTER_ADD(value, type) result.insert(std::make_pair(value, type))
-        STATUS_PRINTER_ADD("BUSY", PRINTER_STATUS_BUSY);
-        STATUS_PRINTER_ADD("DOOR-OPEN", PRINTER_STATUS_DOOR_OPEN);
-        STATUS_PRINTER_ADD("ERROR", PRINTER_STATUS_ERROR);
-        STATUS_PRINTER_ADD("INITIALIZING", PRINTER_STATUS_INITIALIZING);
-        STATUS_PRINTER_ADD("IO-ACTIVE", PRINTER_STATUS_IO_ACTIVE);
-        STATUS_PRINTER_ADD("MANUAL-FEED", PRINTER_STATUS_MANUAL_FEED);
-        STATUS_PRINTER_ADD("NO-TObPrinterNameNER", PRINTER_STATUS_NO_TONER);
-        STATUS_PRINTER_ADD("NOT-AVAILABLE", PRINTER_STATUS_NOT_AVAILABLE);
-        STATUS_PRINTER_ADD("OFFLINE", PRINTER_STATUS_OFFLINE);
-        STATUS_PRINTER_ADD("OUT-OF-MEMORY", PRINTER_STATUS_OUT_OF_MEMORY);
-        STATUS_PRINTER_ADD("OUTPUT-BIN-FULL", PRINTER_STATUS_OUTPUT_BIN_FULL);
-        STATUS_PRINTER_ADD("PAGE-PUNT", PRINTER_STATUS_PAGE_PUNT);
-        STATUS_PRINTER_ADD("PAPER-JAM", PRINTER_STATUS_PAPER_JAM);
-        STATUS_PRINTER_ADD("PAPER-OUT", PRINTER_STATUS_PAPER_OUT);
-        STATUS_PRINTER_ADD("PAPER-PROBLEM", PRINTER_STATUS_PAPER_PROBLEM);
-        STATUS_PRINTER_ADD("PAUSED", PRINTER_STATUS_PAUSED);
-        STATUS_PRINTER_ADD("PENDING-DELETION", PRINTER_STATUS_PENDING_DELETION);
-        STATUS_PRINTER_ADD("POWER-SAVE", PRINTER_STATUS_POWER_SAVE);
-        STATUS_PRINTER_ADD("PRINTING", PRINTER_STATUS_PRINTING);
-        STATUS_PRINTER_ADD("PROCESSING", PRINTER_STATUS_PROCESSING);
-        STATUS_PRINTER_ADD("SERVER-UNKNOWN", PRINTER_STATUS_SERVER_UNKNOWN);
-        STATUS_PRINTER_ADD("TONER-LOW", PRINTER_STATUS_TONER_LOW);
-        STATUS_PRINTER_ADD("USER-INTERVENTION", PRINTER_STATUS_USER_INTERVENTION);
-        STATUS_PRINTER_ADD("WAITING", PRINTER_STATUS_WAITING);
-        STATUS_PRINTER_ADD("WARMING-UP", PRINTER_STATUS_WARMING_UP);
-#undef STATUS_PRINTER_ADD
-        return result;
-    }
+    typedef std::map<std::string, int> StatusMapType;
 
     const StatusMapType &getJobCommandMap()
     {
@@ -90,92 +22,92 @@ namespace
             return result;
         }
 #define COMMAND_JOB_ADD(value, type) result.insert(std::make_pair(value, type))
-        COMMAND_JOB_ADD("CANCEL", JOB_CONTROL_CANCEL);
-        COMMAND_JOB_ADD("PAUSE", JOB_CONTROL_PAUSE);
-        COMMAND_JOB_ADD("RESTART", JOB_CONTROL_RESTART);
-        COMMAND_JOB_ADD("RESUME", JOB_CONTROL_RESUME);
-        COMMAND_JOB_ADD("DELETE", JOB_CONTROL_DELETE);
-        COMMAND_JOB_ADD("SENT-TO-PRINTER", JOB_CONTROL_SENT_TO_PRINTER);
-        COMMAND_JOB_ADD("LAST-PAGE-EJECTED", JOB_CONTROL_LAST_PAGE_EJECTED);
+        COMMAND_JOB_ADD("CANCEL", 0);
+        COMMAND_JOB_ADD("PAUSE", 1);
+        COMMAND_JOB_ADD("RESTART", 2);
+        COMMAND_JOB_ADD("RESUME", 3);
+        COMMAND_JOB_ADD("DELETE", 4);
+        COMMAND_JOB_ADD("SENT-TO-PRINTER", 5);
+        COMMAND_JOB_ADD("LAST-PAGE-EJECTED", 6);
 #ifdef JOB_CONTROL_RETAIN
-        COMMAND_JOB_ADD("RETAIN", JOB_CONTROL_RETAIN);
+        COMMAND_JOB_ADD("RETAIN", 7);
 #endif
 #ifdef JOB_CONTROL_RELEASE
-        COMMAND_JOB_ADD("RELEASE", JOB_CONTROL_RELEASE);
+        COMMAND_JOB_ADD("RELEASE", 8);
 #endif
 #undef COMMAND_JOB_ADD
         return result;
     }
 
-    void ParseJobObject(JOB_INFO_2W *job, Napi::Object &result)
-    {
-        Napi::Env env = result.Env();
+    // void ParseJobObject(JOB_INFO_2W *job, Napi::Object &result)
+    // {
+    //     Napi::Env env = result.Env();
 
-        result.Set("id", Napi::Number::New(env, job->JobId));
+    //     result.Set("id", Napi::Number::New(env, job->JobId));
 
-        if (job->pPrinterName && *job->pPrinterName != L'\0')
-        {
-            result.Set("name", Napi::String::New(env, (char16_t *)job->pPrinterName));
-        }
+    //     if (job->pPrinterName && *job->pPrinterName != L'\0')
+    //     {
+    //         result.Set("name", Napi::String::New(env, (char16_t *)job->pPrinterName));
+    //     }
 
-        if (job->pUserName && *job->pUserName != L'\0')
-        {
-            result.Set("user", Napi::String::New(env, (char16_t *)job->pUserName));
-        }
+    //     if (job->pUserName && *job->pUserName != L'\0')
+    //     {
+    //         result.Set("user", Napi::String::New(env, (char16_t *)job->pUserName));
+    //     }
 
-        result.Set("priority", Napi::Number::New(env, job->Priority));
-        result.Set("size", Napi::Number::New(env, job->Size));
+    //     result.Set("priority", Napi::Number::New(env, job->Priority));
+    //     result.Set("size", Napi::Number::New(env, job->Size));
 
-        // Status handling
-        Napi::Array statusArray = Napi::Array::New(env);
-        int statusIndex = 0;
+    //     // Status handling
+    //     Napi::Array statusArray = Napi::Array::New(env);
+    //     int statusIndex = 0;
 
-        for (const auto &status : getStatusMap())
-        {
-            if (job->Status & status.second)
-            {
-                statusArray.Set(statusIndex++, Napi::String::New(env, status.first));
-            }
-        }
+    //     for (const auto &status : getStatusMap())
+    //     {
+    //         if (job->Status & status.second)
+    //         {
+    //             statusArray.Set(statusIndex++, Napi::String::New(env, status.first));
+    //         }
+    //     }
 
-        if (job->pStatus && *job->pStatus != L'\0')
-        {
-            statusArray.Set(statusIndex, Napi::String::New(env, (char16_t *)job->pStatus));
-        }
+    //     if (job->pStatus && *job->pStatus != L'\0')
+    //     {
+    //         statusArray.Set(statusIndex, Napi::String::New(env, (char16_t *)job->pStatus));
+    //     }
 
-        result.Set("status", statusArray);
-        result.Set("position", Napi::Number::New(env, job->Position));
-        result.Set("totalPages", Napi::Number::New(env, job->TotalPages));
-        result.Set("pagesPrinted", Napi::Number::New(env, job->PagesPrinted));
-    }
+    //     result.Set("status", statusArray);
+    //     result.Set("position", Napi::Number::New(env, job->Position));
+    //     result.Set("totalPages", Napi::Number::New(env, job->TotalPages));
+    //     result.Set("pagesPrinted", Napi::Number::New(env, job->PagesPrinted));
+    // }
 
-    std::string GetLastErrorMessage()
-    {
-        std::ostringstream ss;
-        DWORD errorCode = GetLastError();
-        ss << "code: " << errorCode;
+    // std::string GetLastErrorMessage()
+    // {
+    //     std::ostringstream ss;
+    //     DWORD errorCode = GetLastError();
+    //     ss << "code: " << errorCode;
 
-        DWORD retSize;
-        LPTSTR pTemp = NULL;
+    //     DWORD retSize;
+    //     LPTSTR pTemp = NULL;
 
-        retSize = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                                    FORMAT_MESSAGE_FROM_SYSTEM |
-                                    FORMAT_MESSAGE_ARGUMENT_ARRAY,
-                                NULL,
-                                errorCode,
-                                LANG_NEUTRAL,
-                                (LPTSTR)&pTemp,
-                                0,
-                                NULL);
+    //     retSize = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+    //                                 FORMAT_MESSAGE_FROM_SYSTEM |
+    //                                 FORMAT_MESSAGE_ARGUMENT_ARRAY,
+    //                             NULL,
+    //                             errorCode,
+    //                             LANG_NEUTRAL,
+    //                             (LPTSTR)&pTemp,
+    //                             0,
+    //                             NULL);
 
-        if (retSize && pTemp != NULL)
-        {
-            ss << ", message: " << std::string(pTemp);
-            LocalFree((HLOCAL)pTemp);
-        }
+    //     if (retSize && pTemp != NULL)
+    //     {
+    //         ss << ", message: " << std::string(pTemp);
+    //         LocalFree((HLOCAL)pTemp);
+    //     }
 
-        return ss.str();
-    }
+    //     return ss.str();
+    // }
 }
 
 Napi::String StdStringToNapiString(Napi::Env env, std::string str)
@@ -499,53 +431,53 @@ Napi::Value GetOneJob(const Napi::CallbackInfo &info)
     // return resultPrinterJob;
 }
 
-Napi::Value SetOneJob(const Napi::CallbackInfo &info)
-{
-    Napi::Env env = info.Env();
+// Napi::Value SetOneJob(const Napi::CallbackInfo &info)
+// {
+//     Napi::Env env = info.Env();
 
-    // Check arguments
-    if (info.Length() < 3)
-    {
-        Napi::TypeError::New(env, "Expected three arguments").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    if (!info[0].IsString() || !info[1].IsNumber() || !info[2].IsString())
-    {
-        Napi::TypeError::New(env, "Expected a string, a number, and a string").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
+//     // Check arguments
+//     if (info.Length() < 3)
+//     {
+//         Napi::TypeError::New(env, "Expected three arguments").ThrowAsJavaScriptException();
+//         return env.Undefined();
+//     }
+//     if (!info[0].IsString() || !info[1].IsNumber() || !info[2].IsString())
+//     {
+//         Napi::TypeError::New(env, "Expected a string, a number, and a string").ThrowAsJavaScriptException();
+//         return env.Undefined();
+//     }
 
-    std::wstring printerName = GetWStringFromNapiValue(info[0]);
-    int jobId = info[1].As<Napi::Number>().Int32Value();
-    if (jobId < 0)
-    {
-        Napi::Error::New(env, "Wrong job number").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
+//     std::wstring printerName = GetWStringFromNapiValue(info[0]);
+//     int jobId = info[1].As<Napi::Number>().Int32Value();
+//     if (jobId < 0)
+//     {
+//         Napi::Error::New(env, "Wrong job number").ThrowAsJavaScriptException();
+//         return env.Undefined();
+//     }
 
-    std::string jobCommandStr = info[2].As<Napi::String>().Utf8Value();
-    StatusMapType::const_iterator itJobCommand = getJobCommandMap().find(jobCommandStr);
-    if (itJobCommand == getJobCommandMap().end())
-    {
-        Napi::Error::New(env, "Wrong job command. Use getSupportedJobCommands to see the possible commands").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    DWORD jobCommand = itJobCommand->second;
+//     std::string jobCommandStr = info[2].As<Napi::String>().Utf8Value();
+//     StatusMapType::const_iterator itJobCommand = getJobCommandMap().find(jobCommandStr);
+//     if (itJobCommand == getJobCommandMap().end())
+//     {
+//         Napi::Error::New(env, "Wrong job command. Use getSupportedJobCommands to see the possible commands").ThrowAsJavaScriptException();
+//         return env.Undefined();
+//     }
+//     DWORD jobCommand = itJobCommand->second;
 
-    // Open a handle to the printer
-    PrinterHandle printerHandle((LPWSTR)printerName.c_str());
-    if (!printerHandle)
-    {
-        std::string errorStr = "Error on PrinterHandle: " + GetLastErrorMessage();
-        Napi::Error::New(env, errorStr).ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
+//     // Open a handle to the printer
+//     PrinterHandle printerHandle((LPWSTR)printerName.c_str());
+//     if (!printerHandle)
+//     {
+//         std::string errorStr = "Error on PrinterHandle:";
+//         Napi::Error::New(env, errorStr).ThrowAsJavaScriptException();
+//         return env.Undefined();
+//     }
 
-    // Set the job command
-    BOOL ok = SetJobW(*printerHandle, static_cast<DWORD>(jobId), 0, NULL, jobCommand);
+//     // Set the job command
+//     BOOL ok = SetJobW(*printerHandle, static_cast<DWORD>(jobId), 0, NULL, jobCommand);
 
-    return Napi::Boolean::New(env, ok == TRUE);
-}
+//     return Napi::Boolean::New(env, ok == TRUE);
+// }
 
 Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo &info)
 {

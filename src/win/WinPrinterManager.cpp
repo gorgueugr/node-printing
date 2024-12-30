@@ -54,6 +54,31 @@ std::string LPWSTRToString(const wchar_t *wstr)
     return strTo;
 }
 
+// const StatusMapType &getJobCommandMap()
+// {
+//     static StatusMapType result;
+//     if (!result.empty())
+//     {
+//         return result;
+//     }
+// #define COMMAND_JOB_ADD(value, type) result.insert(std::make_pair(value, type))
+//     COMMAND_JOB_ADD("CANCEL", JOB_CONTROL_CANCEL);
+//     COMMAND_JOB_ADD("PAUSE", JOB_CONTROL_PAUSE);
+//     COMMAND_JOB_ADD("RESTART", JOB_CONTROL_RESTART);
+//     COMMAND_JOB_ADD("RESUME", JOB_CONTROL_RESUME);
+//     COMMAND_JOB_ADD("DELETE", JOB_CONTROL_DELETE);
+//     COMMAND_JOB_ADD("SENT-TO-PRINTER", JOB_CONTROL_SENT_TO_PRINTER);
+//     COMMAND_JOB_ADD("LAST-PAGE-EJECTED", JOB_CONTROL_LAST_PAGE_EJECTED);
+// #ifdef JOB_CONTROL_RETAIN
+//     COMMAND_JOB_ADD("RETAIN", JOB_CONTROL_RETAIN);
+// #endif
+// #ifdef JOB_CONTROL_RELEASE
+//     COMMAND_JOB_ADD("RELEASE", JOB_CONTROL_RELEASE);
+// #endif
+// #undef COMMAND_JOB_ADD
+//     return result;
+// }
+
 typedef std::map<std::string, DWORD> StatusMapType;
 typedef std::map<SHORT, std::string> PaperSizeMapType;
 
