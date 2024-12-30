@@ -318,6 +318,62 @@ Color getColorType(SHORT color)
     return Color::MONOCHROME;
 }
 
+PrintQuality getPrintQualityType(DWORD printQuality)
+{
+
+    switch (printQuality)
+    {
+    case DMRES_DRAFT:
+        return PrintQuality::DRAFT;
+    case DMRES_LOW:
+        return PrintQuality::LOW;
+    case DMRES_MEDIUM:
+        return PrintQuality::MEDIUM;
+    case DMRES_HIGH:
+        return PrintQuality::HIGH;
+    default:
+        return PrintQuality::DRAFT;
+    }
+    return PrintQuality::DRAFT;
+}
+
+std::string getPrinterSource(DWORD defaultSource)
+{
+    switch (defaultSource)
+    {
+    case DMBIN_UPPER:
+        return "UPPER";
+    case DMBIN_LOWER:
+        return "LOWER";
+    case DMBIN_MIDDLE:
+        return "MIDDLE";
+    case DMBIN_MANUAL:
+        return "MANUAL";
+    case DMBIN_ENVELOPE:
+        return "ENVELOPE";
+    case DMBIN_ENVMANUAL:
+        return "ENVMANUAL";
+    case DMBIN_AUTO:
+        return "AUTO";
+    case DMBIN_TRACTOR:
+        return "TRACTOR";
+    case DMBIN_SMALLFMT:
+        return "SMALLFMT";
+    case DMBIN_LARGEFMT:
+        return "LARGEFMT";
+    case DMBIN_LARGECAPACITY:
+        return "LARGECAPACITY";
+    case DMBIN_CASSETTE:
+        return "CASSETTE";
+    case DMBIN_FORMSOURCE:
+        return "FORMSOURCE";
+    case DMBIN_USER:
+        return "USER";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 std::vector<std::string> getStatusArray(DWORD status)
 {
     std::vector<std::string> result;
@@ -632,7 +688,7 @@ ErrorMessage *PrinterManager::getPrinterDevMode(const std::wstring &printerName,
 
     // Get required buffer size
     DWORD needed = 0;
-    GetPrinter(printerHandle, 2, NULL, 0, &needed);
+    GetPrinterW(printerHandle, 2, NULL, 0, &needed);
     if (needed == 0)
     {
         static ErrorMessage errorMsg = "Failed to get printer info size";
@@ -648,7 +704,7 @@ ErrorMessage *PrinterManager::getPrinterDevMode(const std::wstring &printerName,
         return &errorMsg;
     }
     // Get printer info
-    if (!GetPrinter(printerHandle, 2, (LPBYTE)pInfo.get(), needed, &needed))
+    if (!GetPrinterW(printerHandle, 2, (LPBYTE)pInfo.get(), needed, &needed))
     {
         static ErrorMessage errorMsg = "Failed to get printer info";
         return &errorMsg;
@@ -661,7 +717,6 @@ ErrorMessage *PrinterManager::getPrinterDevMode(const std::wstring &printerName,
     }
 
     pDevMode.deviceName = printerName;
-    pDevMode.paperSizeShort = pInfo->pDevMode->dmPaperSize;
     pDevMode.paperSize = getPaperSizeName(pInfo->pDevMode->dmPaperSize);
 
     // dmPaperSize This member must be zero if the length and width of the paper are specified by the dmPaperLength and dmPaperWidth members.
@@ -674,6 +729,10 @@ ErrorMessage *PrinterManager::getPrinterDevMode(const std::wstring &printerName,
     pDevMode.duplex = getDuplexType(pInfo->pDevMode->dmDuplex);
     pDevMode.color = getColorType(pInfo->pDevMode->dmColor);
     pDevMode.copies = (int)pInfo->pDevMode->dmCopies;
+    pDevMode.defaultSource = getPrinterSource(pInfo->pDevMode->dmDefaultSource);
+    pDevMode.printQuality = getPrintQualityType(pInfo->pDevMode->dmPrintQuality);
+    pDevMode.scale = pInfo->pDevMode->dmScale;
+    pDevMode.collate = (pInfo->pDevMode->dmCollate == DMCOLLATE_TRUE);
 
     return NULL;
 }

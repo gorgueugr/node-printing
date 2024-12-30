@@ -616,6 +616,10 @@ Napi::Value GetPrinterDevMode(const Napi::CallbackInfo &info)
     result.Set("duplex", WideToNapiString(env, duplex_str[printerDevMode.duplex]));
     result.Set("copies", Napi::Number::New(env, printerDevMode.copies));
     result.Set("color", WideToNapiString(env, color_str[printerDevMode.color]));
+    result.Set("defaultSource", WideToNapiString(env, printerDevMode.defaultSource));
+    result.Set("printQuality", WideToNapiString(env, printQuality_str[printerDevMode.printQuality]));
+    result.Set("scale", Napi::Number::New(env, printerDevMode.scale));
+    result.Set("collate", Napi::Boolean::New(env, printerDevMode.collate));
 
     return result;
 }

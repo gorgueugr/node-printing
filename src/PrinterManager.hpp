@@ -26,9 +26,18 @@ enum Color
     COLOR
 };
 
+enum PrintQuality
+{
+    DRAFT = 0,
+    LOW,
+    MEDIUM,
+    HIGH
+};
+
 static const char *orientation_str[] = {"PORTRAIT", "LANDSCAPE"};
 static const char *duplex_str[] = {"SIMPLEX", "VERTICAL", "HORIZONTAL"};
 static const char *color_str[] = {"MONOCHROME", "COLOR"};
+static const char *printQuality_str[] = {"DRAFT", "LOW", "MEDIUM", "HIGH"};
 
 struct JobInfo
 {
@@ -67,12 +76,13 @@ struct PrinterInfo
 struct PrinterDevMode
 {
     PrinterName deviceName;
-    short paperSizeShort;
     std::string paperSize;
     Orientation orientation;
     int copies;
     std::string defaultSource;
-    std::string printQuality;
+    PrintQuality printQuality;
+    int scale;
+    bool collate;
     Color color;
     Duplex duplex;
 };
