@@ -110,12 +110,12 @@ namespace
     // }
 }
 
-Napi::String StdStringToNapiString(Napi::Env env, std::string str)
+Napi::String StdStringToNapiString(Napi::Env env, const std::string str)
 {
     return Napi::String::New(env, str.c_str());
 }
 
-Napi::String StdStringToNapiString(Napi::Env env, std::wstring str)
+Napi::String StdStringToNapiString(Napi::Env env, const std::wstring str)
 {
     std::string strTo(str.begin(), str.end());
     return Napi::String::New(env, strTo.c_str());
@@ -134,7 +134,7 @@ std::wstring GetWStringFromNapiValue(const Napi::Value &value)
 void AddResultStringArray(Napi::Env env, Napi::Object &result, const std::vector<std::string> &array, const std::string &name)
 {
     Napi::Array arrayResult = Napi::Array::New(env, array.size());
-    for (int i = 0; i < array.size(); ++i)
+    for (int i = 0; i < (int)array.size(); ++i)
     {
         arrayResult[i] = StdStringToNapiString(env, array[i]);
     }
@@ -235,7 +235,7 @@ Napi::Array GetPrinters(const Napi::CallbackInfo &info)
     }
 
     Napi::Array result = Napi::Array::New(env, printersInfo.size());
-    for (int i = 0; i < printersInfo.size(); ++i)
+    for (int i = 0; i < (int)printersInfo.size(); ++i)
     {
         Napi::Object printerObj = Napi::Object::New(env);
         ParsePrinterObject(printersInfo[i], printerObj);
@@ -494,7 +494,7 @@ Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo &info)
     }
 
     Napi::Array result = Napi::Array::New(env, dataTypes.size());
-    for (int i = 0; i < dataTypes.size(); ++i)
+    for (int i = 0; i < (int)dataTypes.size(); ++i)
     {
         result[i] = Napi::String::New(env, dataTypes[i].c_str());
     }
@@ -533,12 +533,12 @@ Napi::Value GetPrinterDevMode(const Napi::CallbackInfo &info)
     Napi::Object result = Napi::Object::New(env);
     result.Set("deviceName", StdStringToNapiString(env, printerDevMode.deviceName));
     result.Set("paperSize", StdStringToNapiString(env, printerDevMode.paperSize));
-    result.Set("orientation", StdStringToNapiString(env, orientation_str[printerDevMode.orientation]));
-    result.Set("duplex", StdStringToNapiString(env, duplex_str[printerDevMode.duplex]));
+    result.Set("orientation", StdStringToNapiString(env, orientation_str.at(printerDevMode.orientation)));
+    result.Set("duplex", StdStringToNapiString(env, duplex_str.at(printerDevMode.duplex)));
     result.Set("copies", Napi::Number::New(env, printerDevMode.copies));
-    result.Set("color", StdStringToNapiString(env, color_str[printerDevMode.color]));
+    result.Set("color", StdStringToNapiString(env, color_str.at(printerDevMode.color)));
     result.Set("defaultSource", StdStringToNapiString(env, printerDevMode.defaultSource));
-    result.Set("printQuality", StdStringToNapiString(env, printQuality_str[printerDevMode.printQuality]));
+    result.Set("printQuality", StdStringToNapiString(env, printQuality_str.at(printerDevMode.printQuality)));
     result.Set("scale", Napi::Number::New(env, printerDevMode.scale));
     result.Set("collate", Napi::Boolean::New(env, printerDevMode.collate));
 

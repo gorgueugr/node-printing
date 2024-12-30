@@ -7,7 +7,7 @@ const defaultPrinterName = printer.getDefaultPrinterName();
 
 console.log(defaultPrinterName);
 
-// console.log(printer.getPrinter(defaultPrinterName));
+console.log(printer.getPrinter(defaultPrinterName));
 
 // console.log(printer.getPrinters());
 

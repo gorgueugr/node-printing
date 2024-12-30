@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 
 typedef std::wstring PrinterName;
 typedef std::string ErrorMessage;
@@ -34,10 +35,10 @@ enum PrintQuality
     HIGH
 };
 
-static const char *orientation_str[] = {"PORTRAIT", "LANDSCAPE"};
-static const char *duplex_str[] = {"SIMPLEX", "VERTICAL", "HORIZONTAL"};
-static const char *color_str[] = {"MONOCHROME", "COLOR"};
-static const char *printQuality_str[] = {"DRAFT", "LOW", "MEDIUM", "HIGH"};
+const std::map orientation_str = std::map<Orientation, std::string>{{Orientation::PORTRAIT, "PORTRAIT"}, {Orientation::LANDSCAPE, "LANDSCAPE"}};
+const std::map duplex_str = std::map<Duplex, std::string>{{Duplex::SIMPLEX, "SIMPLEX"}, {Duplex::VERTICAL, "VERTICAL"}, {Duplex::HORIZONTAL, "HORIZONTAL"}};
+const std::map color_str = std::map<Color, std::string>{{Color::MONOCHROME, "MONOCHROME"}, {Color::COLOR, "COLOR"}};
+const std::map printQuality_str = std::map<PrintQuality, std::string>{{PrintQuality::DRAFT, "DRAFT"}, {PrintQuality::LOW, "LOW"}, {PrintQuality::MEDIUM, "MEDIUM"}, {PrintQuality::HIGH, "HIGH"}};
 
 struct JobInfo
 {
