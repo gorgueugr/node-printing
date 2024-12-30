@@ -277,8 +277,14 @@ Napi::String GetDefaultPrinterName(const Napi::CallbackInfo &info)
     Napi::Env env = info.Env();
 
     PrinterManager *printerManager = new PrinterManager();
+    PrinterName defaultPrinterName;
 
-    PrinterName defaultPrinterName = printerManager->getDefaultPrinterName();
+    ErrorMessage *errorMessage = printerManager->getDefaultPrinterName(defaultPrinterName);
+    if (errorMessage != NULL)
+    {
+        Napi::Error::New(env, (std::string)*errorMessage).ThrowAsJavaScriptException();
+        return Napi::String::New(env, "");
+    }
 
     return StdStringToNapiString(env, defaultPrinterName);
 }

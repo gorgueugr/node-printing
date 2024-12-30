@@ -394,35 +394,37 @@ std::vector<std::string> getStatusArray(DWORD status)
 // *                        PrinterManager Implementation
 // * ___________________________________________________________________________
 
-PrinterName PrinterManager::getDefaultPrinterName()
+ErrorMessage *PrinterManager::getDefaultPrinterName(PrinterName &printerName)
 {
-
     DWORD cSize = 0;
     GetDefaultPrinterW(NULL, &cSize);
 
     if (cSize == 0)
     {
-        throw std::runtime_error("Error could not get default printer name");
+        static ErrorMessage errorMsg = "Error could not get default printer name";
+        return &errorMsg;
     }
 
     MemValue<uint16_t> bPrinterName(cSize * sizeof(uint16_t));
 
     if (bPrinterName == NULL)
     {
-        throw std::runtime_error("Error on allocating memory for printer name");
+        static ErrorMessage errorMsg = "Error on allocating memory for printer name";
+        return &errorMsg;
     }
 
     BOOL res = GetDefaultPrinterW((LPWSTR)(bPrinterName.get()), &cSize);
 
     if (!res)
     {
-        throw std::runtime_error("Error on GetDefaultPrinterW");
+        static ErrorMessage errorMsg = "Error on GetDefaultPrinterW";
+        return &errorMsg;
     }
 
     std::string result = LPWSTRToString(reinterpret_cast<const wchar_t *>(bPrinterName.get()));
-    std::wstring wide = std::wstring(result.begin(), result.end());
+    printerName = std::wstring(result.begin(), result.end());
 
-    return wide;
+    return NULL;
 }
 
 ErrorMessage *PrinterManager::getOneJob(PrinterName name, int jobId, JobInfo &jobInfo)

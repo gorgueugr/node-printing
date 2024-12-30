@@ -120,7 +120,7 @@ protected:
 class PrinterManager
 {
 public:
-    PrinterName getDefaultPrinterName();
+    ErrorMessage *getDefaultPrinterName(PrinterName &printerName);
     ErrorMessage *getOneJob(PrinterName name, int jobId, JobInfo &jobInfo);
     ErrorMessage *getOnePrinter(PrinterName name, PrinterInfo &printerInfo);
     ErrorMessage *getPrinters(std::vector<PrinterInfo> &printersInfo);
