@@ -3,7 +3,6 @@
 
 #include <napi.h>
 #include <string>
-#include <windows.h>
 
 /**
  * Send data to printer
@@ -79,37 +78,5 @@ Napi::Value SetOneJob(const Napi::CallbackInfo &info);
 /** Get supported job commands for setJob method
  */
 Napi::Value GetSupportedJobCommands(const Napi::CallbackInfo &info);
-
-// Util class
-
-/** Memory value class management to avoid memory leak */
-template <typename Type>
-class MemValueBase
-{
-public:
-    MemValueBase() : _value(nullptr) {}
-
-    /** Destructor. The allocated memory will be deallocated */
-    virtual ~MemValueBase() {}
-
-    Type *get() { return _value; }
-    Type *operator->() { return _value; }
-    operator bool() const { return (_value != nullptr); }
-
-protected:
-    Type *_value;
-
-    virtual void free() {}
-};
-
-// Memory value class management to avoid memory leak
-
-/**
- * Try to extract String or buffer from N-API value
- * @param napiValue - source N-API value
- * @param outputData - destination data
- * @return TRUE if value is String or Buffer, FALSE otherwise
- */
-bool GetStringOrBufferFromNapiValue(Napi::Value napiValue, std::string &outputData);
 
 #endif
