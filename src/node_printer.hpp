@@ -2,81 +2,49 @@
 #define NODE_PRINTER_HPP
 
 #include <napi.h>
-#include <string>
 
-/**
- * Send data to printer
- *
- * @param data String/NativeBuffer, mandatory, raw data bytes
- * @param printername String, mandatory, specifying printer name
- * @param docname String, mandatory, specifying document name
- * @param type String, mandatory, specifying data type. E.G.: RAW, TEXT, ...
- *
- * @returns true for success, false for failure.
- */
-// Napi::Value PrintDirect(const Napi::CallbackInfo& info);
+/** N-API entry points exported by the addon (see src/node_printer.cpp). */
 
-/**
- * Send file to printer
- *
- * @param filename String, mandatory, specifying filename to print
- * @param docname String, mandatory, specifying document name
- * @param printer String, mandatory, specifying printer name
- *
- * @returns jobId for success, or error message for failure.
- */
-// Napi::Value PrintFile(const Napi::CallbackInfo& info);
+/** All print queues known to the spooler. */
+Napi::Value GetPrinters(const Napi::CallbackInfo &info);
 
-/** Retrieve all printers and jobs
- * posix: minimum version: CUPS 1.1.21/OS X 10.4
- */
-Napi::Array GetPrinters(const Napi::CallbackInfo &info);
+/** Name of the default queue, empty string when none is configured. */
+Napi::Value GetDefaultPrinterName(const Napi::CallbackInfo &info);
 
-/**
- * Return default printer name, if null then default printer is not set
- */
-Napi::String GetDefaultPrinterName(const Napi::CallbackInfo &info);
+/** One queue by name. */
+Napi::Value GetPrinter(const Napi::CallbackInfo &info);
 
-/** Retrieve printer info and jobs
- * @param printer name String
- */
-Napi::Value GetOnePrinter(const Napi::CallbackInfo &info);
+/** Default configuration of one queue. */
+Napi::Value GetPrinterDevMode(const Napi::CallbackInfo &info);
 
-/** Retrieve printer driver info
- * @param printer name String
- */
-// Napi::Value GetPrinterDriverOptions(const Napi::CallbackInfo& info);
+/** Driver options of one queue. */
+Napi::Value GetPrinterDriverOptions(const Napi::CallbackInfo &info);
 
-/** Retrieve job info
- *  @param printer name String
- *  @param job id Number
- */
-Napi::Value GetOneJob(const Napi::CallbackInfo &info);
+/** Jobs of a queue (or of every queue when the name is omitted). */
+Napi::Value GetJobs(const Napi::CallbackInfo &info);
 
-/** Set job command.
- * arguments:
- * @param printer name String
- * @param job id Number
- * @param job command String
- * Possible commands:
- *      "CANCEL"
- *      "PAUSE"
- *      "RESTART"
- *      "RESUME"
- *      "DELETE"
- *      "SENT-TO-PRINTER"
- *      "LAST-PAGE-EJECTED"
- *      "RETAIN"
- *      "RELEASE"
- */
-Napi::Value SetOneJob(const Napi::CallbackInfo &info);
+/** One job by id. */
+Napi::Value GetJob(const Napi::CallbackInfo &info);
 
-/** Get supported print formats for printDirect. It depends on platform
- */
-//  Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo& info);
+/** Control a job: CANCEL, PAUSE, RESUME, RESTART, DELETE, HOLD, RELEASE... */
+Napi::Value SetJob(const Napi::CallbackInfo &info);
 
-/** Get supported job commands for setJob method
- */
+/** Send a string/Buffer to a queue. */
+Napi::Value PrintDirect(const Napi::CallbackInfo &info);
+
+/** Same as printDirect but asynchronous: returns a Promise. */
+Napi::Value PrintDirectAsync(const Napi::CallbackInfo &info);
+
+/** Send a file to a queue. */
+Napi::Value PrintFile(const Napi::CallbackInfo &info);
+
+/** Same as printFile but asynchronous: returns a Promise. */
+Napi::Value PrintFileAsync(const Napi::CallbackInfo &info);
+
+/** Data types accepted by printDirect/printFile on this platform. */
+Napi::Value GetSupportedPrintFormats(const Napi::CallbackInfo &info);
+
+/** Job commands accepted by setJob on this platform. */
 Napi::Value GetSupportedJobCommands(const Napi::CallbackInfo &info);
 
-#endif
+#endif // NODE_PRINTER_HPP

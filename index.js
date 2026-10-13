@@ -1,41 +1,27 @@
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
+/**
+ * ES module entry point: `import { getPrinters } from 'printing'`.
+ *
+ * The native addon itself is CommonJS, so the wrapper is imported and its
+ * functions are re-exported as named exports.
+ */
 
-const printer = require('./lib/printer.cjs');
+import api from './lib/api.cjs';
 
-const defaultPrinterName = printer.getDefaultPrinterName();
+export const getPrinters = api.getPrinters;
+export const getDefaultPrinterName = api.getDefaultPrinterName;
+export const getDefaultPrinter = api.getDefaultPrinter;
+export const getPrinter = api.getPrinter;
+export const getPrinterDevMode = api.getPrinterDevMode;
+export const getPrinterDriverOptions = api.getPrinterDriverOptions;
+export const getJobs = api.getJobs;
+export const getJob = api.getJob;
+export const setJob = api.setJob;
+export const cancelJob = api.cancelJob;
+export const getSupportedJobCommands = api.getSupportedJobCommands;
+export const getSupportedPrintFormats = api.getSupportedPrintFormats;
+export const printDirect = api.printDirect;
+export const printDirectAsync = api.printDirectAsync;
+export const printFile = api.printFile;
+export const printFileAsync = api.printFileAsync;
 
-console.log(defaultPrinterName);
-
-console.log(printer.getPrinter(defaultPrinterName));
-
-// console.log(printer.getPrinters());
-
-// // console.log(printer.getSupportedJobCommands());
-
-// // const printerName = "Microsoft Print to PDF";
-// // const printerName = "WF-7830 Series(Red)";
-// // // const printerName = "Microsoft XPS Document Writer";
-
-// // console.log(printer.getPrinter(printerName));
-
-// // const testPrint = fs.readFileSync('test.pcl');
-// // const testPrint = "Hola Mundo".repeat(100);
-
-// // console.log(testPrint);
-
-// // const result = printer.printDirect(testPrint, printerName, 'test.PCL', 'RAW');
-// // console.log(result);
-
-// for (const print of printer.getPrinters()) {
-
-//     console.log(printer.getPrinterDevMode(print.name));
-
-
-// }
-
-
-// console.log(printer.getSupportedPrintFormats());
-// console.log(printer.getSupportedJobCommands());
-
-// console.log(printer.getJob(defaultPrinterName, 1));
+export default api;

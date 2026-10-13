@@ -1,5 +1,15 @@
-.vscode
-build
+# node_modules and the compiled addon are never committed
+node_modules/
+build/
+*.node
 
-node_modules
+# npm and build logs
+npm-debug.log*
+yarn-error.log*
+*.log
 
+# editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+*.swp

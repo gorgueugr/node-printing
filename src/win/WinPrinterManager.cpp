@@ -1,765 +1,1845 @@
+/*
+ * Windows backend of node-printing (Winspool / GDI / DEVMODE).
+ *
+ * See src/PrinterManager.hpp for the frozen contract. Conventions kept here:
+ *   - every std::string is UTF-8; UTF-16 is used only at the Win32 boundary
+ *     (utf8ToWide / wideToUtf8, CP_UTF8)
+ *   - a method returns an empty string on success, a human readable message
+ *     (always carrying the Win32 error code and its FormatMessage text) on
+ *     failure; nothing throws and nothing leaks, printer handles are RAII
+ *   - JOB_INFO_1W/JOB_INFO_2W, PRINTER_INFO_2W and DEVMODEW are mapped into the
+ *     platform independent structs, unmapped values are left 0/-1/empty
+ *
+ * Job command aliases accepted by setJob (after normaliseJobCommand()):
+ *   PAUSE  and HOLD    -> JOB_CONTROL_PAUSE
+ *   RESUME and RELEASE -> JOB_CONTROL_RESUME
+ * The remaining commands map one to one. JOB_CONTROL_RETAIN, JOB_CONTROL_RELEASE,
+ * JOB_CONTROL_SENT_TO_PRINTER and JOB_CONTROL_LAST_PAGE_EJECTED only exist in
+ * Windows SDKs starting with XP, so their handling is #ifdef fed.
+ *
+ * Deliberate behaviour worth knowing:
+ *   - getJobs("") enumerates every queue and skips the ones that cannot be
+ *     opened (a single unreachable network queue must not fail the whole call);
+ *     with an explicit printer name every failure is reported
+ *   - EnumJobsW is tried at level 2 first (it carries Size/Time/pDevMode) and
+ *     falls back to level 1 for drivers that only implement that
+ *   - the spooler exposes no "processing" timestamp, so processingTime stays -1
+ *     and completedTime is derived from Submitted + Time for finished jobs
+ */
+
+#ifdef _WIN32
+
 #include "../PrinterManager.hpp"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <windows.h>
-#include <Winspool.h>
-#include <Wingdi.h>
-#pragma comment(lib, "Winspool.lib")
+#include <winspool.h>
+#include <wingdi.h>
 
-#include <string>
+#include <cstddef>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <map>
-#include <utility>
+#include <memory>
 #include <sstream>
-#include <iostream>
+#include <string>
+#include <vector>
 
-struct PrinterHandle
+#pragma comment(lib, "Winspool.lib")
+#pragma comment(lib, "Gdi32.lib")
+
+namespace
 {
-    PrinterHandle(LPWSTR iPrinterName)
+
+/* ------------------------------------------------------------------ */
+/* UTF-8 / UTF-16 conversion                                           */
+/* ------------------------------------------------------------------ */
+
+std::wstring utf8ToWide(const std::string &value)
+{
+    if (value.empty())
     {
-        _ok = OpenPrinterW((LPWSTR)iPrinterName, &_printer, NULL);
+        return std::wstring();
     }
 
-    ~PrinterHandle()
+    const int length = static_cast<int>(value.size());
+    int size = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), length, NULL, 0);
+    if (size <= 0)
     {
-        if (_ok)
+        return std::wstring();
+    }
+
+    std::wstring result(static_cast<size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), length, &result[0], size);
+    return result;
+}
+
+std::string wideToUtf8(const wchar_t *value)
+{
+    if (value == NULL || *value == L'\0')
+    {
+        return std::string();
+    }
+
+    int size = WideCharToMultiByte(CP_UTF8, 0, value, -1, NULL, 0, NULL, NULL);
+    if (size <= 0)
+    {
+        return std::string();
+    }
+
+    std::string result(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value, -1, &result[0], size, NULL, NULL);
+    result.resize(static_cast<size_t>(size - 1)); // drop the terminating NUL
+    return result;
+}
+
+std::string wideToUtf8(const std::wstring &value)
+{
+    return wideToUtf8(value.c_str());
+}
+
+/** cbData bytes of UTF-16, cut at the first NUL, as UTF-8. */
+std::string wideBufferToUtf8(const void *data, DWORD cbData)
+{
+    if (data == NULL || cbData < sizeof(wchar_t))
+    {
+        return std::string();
+    }
+
+    const wchar_t *text = reinterpret_cast<const wchar_t *>(data);
+    std::wstring buffer(text, text + (cbData / sizeof(wchar_t)));
+    size_t end = buffer.find(L'\0');
+    if (end != std::wstring::npos)
+    {
+        buffer.resize(end);
+    }
+    return wideToUtf8(buffer);
+}
+
+/* ------------------------------------------------------------------ */
+/* error reporting                                                     */
+/* ------------------------------------------------------------------ */
+
+std::string trimTrailingWhitespace(const std::string &value)
+{
+    size_t end = value.find_last_not_of(" \t\r\n");
+    if (end == std::string::npos)
+    {
+        return std::string();
+    }
+    return value.substr(0, end + 1);
+}
+
+/** FormatMessage text of a Win32 error code, empty when unavailable. */
+std::string win32ErrorText(DWORD code)
+{
+    LPWSTR buffer = NULL;
+    DWORD length = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                                      FORMAT_MESSAGE_IGNORE_INSERTS,
+                                  NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                                  reinterpret_cast<LPWSTR>(&buffer), 0, NULL);
+
+    std::string text;
+    if (length > 0 && buffer != NULL)
+    {
+        text = wideToUtf8(buffer);
+        LocalFree(reinterpret_cast<HLOCAL>(buffer));
+    }
+    return trimTrailingWhitespace(text);
+}
+
+/** "context (Win32 error code): message" */
+std::string errorWithCode(const std::string &context, DWORD code)
+{
+    std::ostringstream stream;
+    stream << context << " (Win32 error " << static_cast<unsigned long>(code) << ")";
+
+    std::string text = win32ErrorText(code);
+    if (!text.empty())
+    {
+        stream << ": " << text;
+    }
+    return stream.str();
+}
+
+std::string joinList(const std::vector<std::string> &values)
+{
+    std::string result;
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+        if (i != 0)
         {
-            ClosePrinter(_printer);
+            result += ", ";
+        }
+        result += values[i];
+    }
+    return result;
+}
+
+/* ------------------------------------------------------------------ */
+/* small utilities                                                     */
+/* ------------------------------------------------------------------ */
+
+wchar_t lowerWideChar(wchar_t value)
+{
+    if (value >= L'A' && value <= L'Z')
+    {
+        return static_cast<wchar_t>(value - L'A' + L'a');
+    }
+    return value;
+}
+
+bool equalsIgnoreCase(const std::wstring &left, const std::wstring &right)
+{
+    if (left.size() != right.size())
+    {
+        return false;
+    }
+    for (size_t i = 0; i < left.size(); ++i)
+    {
+        if (lowerWideChar(left[i]) != lowerWideChar(right[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string localComputerName()
+{
+    wchar_t buffer[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+    if (!GetComputerNameW(buffer, &size))
+    {
+        return std::string();
+    }
+    return wideToUtf8(buffer);
+}
+
+/** True for NULL, the local machine name, "\\machine" or ".". */
+bool isLocalServerName(const wchar_t *serverName)
+{
+    if (serverName == NULL || *serverName == L'\0')
+    {
+        return true;
+    }
+
+    std::wstring server(serverName);
+    while (!server.empty() && server[0] == L'\\')
+    {
+        server.erase(0, 1);
+    }
+    if (server.empty() || server == L".")
+    {
+        return true;
+    }
+
+    return equalsIgnoreCase(server, utf8ToWide(localComputerName()));
+}
+
+/* ------------------------------------------------------------------ */
+/* RAII printer handle and buffer helpers                              */
+/* ------------------------------------------------------------------ */
+
+class PrinterHandle
+{
+public:
+    PrinterHandle() : _handle(NULL) {}
+    ~PrinterHandle() { close(); }
+
+    bool open(const std::wstring &printerName)
+    {
+        close();
+        if (printerName.empty())
+        {
+            return false;
+        }
+        if (!OpenPrinterW(const_cast<LPWSTR>(printerName.c_str()), &_handle, NULL))
+        {
+            _handle = NULL;
+            return false;
+        }
+        return true;
+    }
+
+    void close()
+    {
+        if (_handle != NULL)
+        {
+            ClosePrinter(_handle);
+            _handle = NULL;
         }
     }
 
-    operator HANDLE() { return _printer; }
-    operator bool() { return (!!_ok); }
-    HANDLE &operator*() { return _printer; }
-    HANDLE *operator->() { return &_printer; }
-    const HANDLE &operator->() const { return _printer; }
+    HANDLE get() const { return _handle; }
 
-    HANDLE _printer;
-    BOOL _ok;
+private:
+    PrinterHandle(const PrinterHandle &);
+    PrinterHandle &operator=(const PrinterHandle &);
+
+    HANDLE _handle;
 };
 
-std::string LPWSTRToString(const wchar_t *wstr)
+/** Enough properly aligned structures to hold `bytes` of a Win32 buffer. */
+template <typename Structure>
+std::vector<Structure> allocateStructures(DWORD bytes)
 {
-    if (wstr == NULL)
+    size_t count = (static_cast<size_t>(bytes) + sizeof(Structure) - 1) / sizeof(Structure);
+    if (count == 0)
     {
-        return std::string("");
+        count = 1;
     }
-    if (wstr[0] == L'\0')
-    {
-        return std::string("");
-    }
-
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
-    std::string strTo(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &strTo[0], size_needed, NULL, NULL);
-
-    return strTo;
+    return std::vector<Structure>(count);
 }
 
-// const StatusMapType &getJobCommandMap()
-// {
-//     static StatusMapType result;
-//     if (!result.empty())
-//     {
-//         return result;
-//     }
-// #define COMMAND_JOB_ADD(value, type) result.insert(std::make_pair(value, type))
-//     COMMAND_JOB_ADD("CANCEL", JOB_CONTROL_CANCEL);
-//     COMMAND_JOB_ADD("PAUSE", JOB_CONTROL_PAUSE);
-//     COMMAND_JOB_ADD("RESTART", JOB_CONTROL_RESTART);
-//     COMMAND_JOB_ADD("RESUME", JOB_CONTROL_RESUME);
-//     COMMAND_JOB_ADD("DELETE", JOB_CONTROL_DELETE);
-//     COMMAND_JOB_ADD("SENT-TO-PRINTER", JOB_CONTROL_SENT_TO_PRINTER);
-//     COMMAND_JOB_ADD("LAST-PAGE-EJECTED", JOB_CONTROL_LAST_PAGE_EJECTED);
-// #ifdef JOB_CONTROL_RETAIN
-//     COMMAND_JOB_ADD("RETAIN", JOB_CONTROL_RETAIN);
-// #endif
-// #ifdef JOB_CONTROL_RELEASE
-//     COMMAND_JOB_ADD("RELEASE", JOB_CONTROL_RELEASE);
-// #endif
-// #undef COMMAND_JOB_ADD
-//     return result;
-// }
-
-typedef std::map<std::string, DWORD> StatusMapType;
-typedef std::map<SHORT, std::string> PaperSizeMapType;
-
-// Status maps implementation
-const StatusMapType &getStatusMap()
+enum EnumerationResult
 {
-    static StatusMapType result;
-    if (!result.empty())
+    ENUMERATION_OK = 0, // buffer filled, `returned` holds the entry count
+    ENUMERATION_EMPTY,  // nothing to enumerate, not an error
+    ENUMERATION_FAILED  // errorCode holds the Win32 error code
+};
+
+/**
+ * Two call size probe shared by EnumPrintersW / EnumJobsW / GetJobW /
+ * EnumPrinterDataExW: ask for the required size with a NULL buffer, allocate,
+ * then enumerate, retrying while the spooler keeps growing between the calls.
+ * "Found nothing" is reported as ENUMERATION_EMPTY so callers can tell it apart
+ * from a real error.
+ */
+template <typename Structure, typename Call>
+EnumerationResult growingEnumerate(std::vector<Structure> &buffer, DWORD &returned, Call call,
+                                   DWORD &errorCode)
+{
+    buffer.clear();
+    returned = 0;
+    errorCode = 0;
+
+    DWORD needed = 0;
+    DWORD count = 0;
+    SetLastError(ERROR_SUCCESS);
+    if (call(NULL, 0, &needed, &count))
     {
-        return result;
+        if (needed == 0 && count == 0)
+        {
+            return ENUMERATION_EMPTY;
+        }
+    }
+    else
+    {
+        DWORD probeError = GetLastError();
+        if (needed == 0)
+        {
+            if (probeError == ERROR_SUCCESS || probeError == ERROR_INSUFFICIENT_BUFFER ||
+                probeError == ERROR_MORE_DATA || probeError == ERROR_INVALID_PARAMETER ||
+                probeError == ERROR_NOT_FOUND || probeError == ERROR_FILE_NOT_FOUND)
+            {
+                return ENUMERATION_EMPTY;
+            }
+            errorCode = probeError;
+            return ENUMERATION_FAILED;
+        }
     }
 
-#define STATUS_PRINTER_ADD(value, type) result.insert(std::make_pair(value, type))
-    STATUS_PRINTER_ADD("BUSY", PRINTER_STATUS_BUSY);
-    STATUS_PRINTER_ADD("DOOR-OPEN", PRINTER_STATUS_DOOR_OPEN);
-    STATUS_PRINTER_ADD("ERROR", PRINTER_STATUS_ERROR);
-    STATUS_PRINTER_ADD("INITIALIZING", PRINTER_STATUS_INITIALIZING);
-    STATUS_PRINTER_ADD("IO-ACTIVE", PRINTER_STATUS_IO_ACTIVE);
-    STATUS_PRINTER_ADD("MANUAL-FEED", PRINTER_STATUS_MANUAL_FEED);
-    STATUS_PRINTER_ADD("NO-TObPrinterNameNER", PRINTER_STATUS_NO_TONER);
-    STATUS_PRINTER_ADD("NOT-AVAILABLE", PRINTER_STATUS_NOT_AVAILABLE);
-    STATUS_PRINTER_ADD("OFFLINE", PRINTER_STATUS_OFFLINE);
-    STATUS_PRINTER_ADD("OUT-OF-MEMORY", PRINTER_STATUS_OUT_OF_MEMORY);
-    STATUS_PRINTER_ADD("OUTPUT-BIN-FULL", PRINTER_STATUS_OUTPUT_BIN_FULL);
-    STATUS_PRINTER_ADD("PAGE-PUNT", PRINTER_STATUS_PAGE_PUNT);
-    STATUS_PRINTER_ADD("PAPER-JAM", PRINTER_STATUS_PAPER_JAM);
-    STATUS_PRINTER_ADD("PAPER-OUT", PRINTER_STATUS_PAPER_OUT);
-    STATUS_PRINTER_ADD("PAPER-PROBLEM", PRINTER_STATUS_PAPER_PROBLEM);
-    STATUS_PRINTER_ADD("PAUSED", PRINTER_STATUS_PAUSED);
-    STATUS_PRINTER_ADD("PENDING-DELETION", PRINTER_STATUS_PENDING_DELETION);
-    STATUS_PRINTER_ADD("POWER-SAVE", PRINTER_STATUS_POWER_SAVE);
-    STATUS_PRINTER_ADD("PRINTING", PRINTER_STATUS_PRINTING);
-    STATUS_PRINTER_ADD("PROCESSING", PRINTER_STATUS_PROCESSING);
-    STATUS_PRINTER_ADD("SERVER-UNKNOWN", PRINTER_STATUS_SERVER_UNKNOWN);
-    STATUS_PRINTER_ADD("TONER-LOW", PRINTER_STATUS_TONER_LOW);
-    STATUS_PRINTER_ADD("USER-INTERVENTION", PRINTER_STATUS_USER_INTERVENTION);
-    STATUS_PRINTER_ADD("WAITING", PRINTER_STATUS_WAITING);
-    STATUS_PRINTER_ADD("WARMING-UP", PRINTER_STATUS_WARMING_UP);
+    if (needed > (64u << 20))
+    {
+        errorCode = ERROR_NOT_ENOUGH_MEMORY;
+        return ENUMERATION_FAILED;
+    }
+
+    buffer = allocateStructures<Structure>(needed);
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        DWORD used = 0;
+        DWORD entryCount = 0;
+        DWORD capacity = static_cast<DWORD>(buffer.size() * sizeof(Structure));
+        SetLastError(ERROR_SUCCESS);
+        if (call(reinterpret_cast<LPBYTE>(buffer.data()), capacity, &used, &entryCount))
+        {
+            returned = entryCount;
+            return ENUMERATION_OK;
+        }
+
+        DWORD code = GetLastError();
+        if ((code == ERROR_MORE_DATA || code == ERROR_INSUFFICIENT_BUFFER) && used > 0 &&
+            used < (64u << 20))
+        {
+            buffer = allocateStructures<Structure>(used);
+            continue;
+        }
+
+        errorCode = code;
+        return ENUMERATION_FAILED;
+    }
+
+    errorCode = ERROR_INSUFFICIENT_BUFFER;
+    return ENUMERATION_FAILED;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* status / attribute / paper size maps                                */
+/* ------------------------------------------------------------------ */
+
+typedef std::map<std::string, DWORD> NameToFlagMap;
+
+/** Names of every flag of `flags` that is listed in `map`. */
+std::vector<std::string> flagsToNames(DWORD flags, const NameToFlagMap &map)
+{
+    std::vector<std::string> names;
+    for (NameToFlagMap::const_iterator it = map.begin(); it != map.end(); ++it)
+    {
+        if (it->second != 0 && (flags & it->second) == it->second)
+        {
+            names.push_back(it->first);
+        }
+    }
+    return names;
+}
+
+/** Name of the entry whose value equals `code`, empty when not listed. */
+std::string nameForCode(DWORD code, const NameToFlagMap &map)
+{
+    for (NameToFlagMap::const_iterator it = map.begin(); it != map.end(); ++it)
+    {
+        if (it->second == code)
+        {
+            return it->first;
+        }
+    }
+    return std::string();
+}
+
+const NameToFlagMap &getPrinterStatusMap()
+{
+    static const NameToFlagMap map = {
+#define STATUS_PRINTER_ADD(value, type) {value, type}
+        STATUS_PRINTER_ADD("BUSY", PRINTER_STATUS_BUSY),
+        STATUS_PRINTER_ADD("DOOR-OPEN", PRINTER_STATUS_DOOR_OPEN),
+        STATUS_PRINTER_ADD("ERROR", PRINTER_STATUS_ERROR),
+        STATUS_PRINTER_ADD("INITIALIZING", PRINTER_STATUS_INITIALIZING),
+        STATUS_PRINTER_ADD("IO-ACTIVE", PRINTER_STATUS_IO_ACTIVE),
+        STATUS_PRINTER_ADD("MANUAL-FEED", PRINTER_STATUS_MANUAL_FEED),
+        STATUS_PRINTER_ADD("NO-TONER", PRINTER_STATUS_NO_TONER),
+        STATUS_PRINTER_ADD("NOT-AVAILABLE", PRINTER_STATUS_NOT_AVAILABLE),
+        STATUS_PRINTER_ADD("OFFLINE", PRINTER_STATUS_OFFLINE),
+        STATUS_PRINTER_ADD("OUT-OF-MEMORY", PRINTER_STATUS_OUT_OF_MEMORY),
+        STATUS_PRINTER_ADD("OUTPUT-BIN-FULL", PRINTER_STATUS_OUTPUT_BIN_FULL),
+        STATUS_PRINTER_ADD("PAGE-PUNT", PRINTER_STATUS_PAGE_PUNT),
+        STATUS_PRINTER_ADD("PAPER-JAM", PRINTER_STATUS_PAPER_JAM),
+        STATUS_PRINTER_ADD("PAPER-OUT", PRINTER_STATUS_PAPER_OUT),
+        STATUS_PRINTER_ADD("PAPER-PROBLEM", PRINTER_STATUS_PAPER_PROBLEM),
+        STATUS_PRINTER_ADD("PAUSED", PRINTER_STATUS_PAUSED),
+        STATUS_PRINTER_ADD("PENDING-DELETION", PRINTER_STATUS_PENDING_DELETION),
+        STATUS_PRINTER_ADD("POWER-SAVE", PRINTER_STATUS_POWER_SAVE),
+        STATUS_PRINTER_ADD("PRINTING", PRINTER_STATUS_PRINTING),
+        STATUS_PRINTER_ADD("PROCESSING", PRINTER_STATUS_PROCESSING),
+        STATUS_PRINTER_ADD("SERVER-UNKNOWN", PRINTER_STATUS_SERVER_UNKNOWN),
+        STATUS_PRINTER_ADD("TONER-LOW", PRINTER_STATUS_TONER_LOW),
+        STATUS_PRINTER_ADD("USER-INTERVENTION", PRINTER_STATUS_USER_INTERVENTION),
+        STATUS_PRINTER_ADD("WAITING", PRINTER_STATUS_WAITING),
+        STATUS_PRINTER_ADD("WARMING-UP", PRINTER_STATUS_WARMING_UP),
 #undef STATUS_PRINTER_ADD
-    return result;
+    };
+    return map;
 }
 
-const StatusMapType &getAttributeMap()
+const NameToFlagMap &getPrinterAttributeMap()
 {
-    static StatusMapType result;
-    if (!result.empty())
-    {
-        return result;
-    }
-    // add only first time
-#define ATTRIBUTE_PRINTER_ADD(value, type) result.insert(std::make_pair(value, type))
-    ATTRIBUTE_PRINTER_ADD("DIRECT", PRINTER_ATTRIBUTE_DIRECT);
-    ATTRIBUTE_PRINTER_ADD("DO-COMPLETE-FIRST", PRINTER_ATTRIBUTE_DO_COMPLETE_FIRST);
-    ATTRIBUTE_PRINTER_ADD("ENABLE-DEVQ", PRINTER_ATTRIBUTE_ENABLE_DEVQ);
-    ATTRIBUTE_PRINTER_ADD("HIDDEN", PRINTER_ATTRIBUTE_HIDDEN);
-    ATTRIBUTE_PRINTER_ADD("KEEPPRINTEDJOBS", PRINTER_ATTRIBUTE_KEEPPRINTEDJOBS);
-    ATTRIBUTE_PRINTER_ADD("LOCAL", PRINTER_ATTRIBUTE_LOCAL);
-    ATTRIBUTE_PRINTER_ADD("NETWORK", PRINTER_ATTRIBUTE_NETWORK);
-    ATTRIBUTE_PRINTER_ADD("PUBLISHED", PRINTER_ATTRIBUTE_PUBLISHED);
-    ATTRIBUTE_PRINTER_ADD("QUEUED", PRINTER_ATTRIBUTE_QUEUED);
-    ATTRIBUTE_PRINTER_ADD("RAW-ONLY", PRINTER_ATTRIBUTE_RAW_ONLY);
-    ATTRIBUTE_PRINTER_ADD("SHARED", PRINTER_ATTRIBUTE_SHARED);
-    ATTRIBUTE_PRINTER_ADD("OFFLINE", PRINTER_ATTRIBUTE_WORK_OFFLINE);
-    // XP
+    static const NameToFlagMap map = {
+#define ATTRIBUTE_PRINTER_ADD(value, type) {value, type}
+        ATTRIBUTE_PRINTER_ADD("DIRECT", PRINTER_ATTRIBUTE_DIRECT),
+        ATTRIBUTE_PRINTER_ADD("DO-COMPLETE-FIRST", PRINTER_ATTRIBUTE_DO_COMPLETE_FIRST),
+        ATTRIBUTE_PRINTER_ADD("ENABLE-DEVQ", PRINTER_ATTRIBUTE_ENABLE_DEVQ),
+        ATTRIBUTE_PRINTER_ADD("HIDDEN", PRINTER_ATTRIBUTE_HIDDEN),
+        ATTRIBUTE_PRINTER_ADD("KEEPPRINTEDJOBS", PRINTER_ATTRIBUTE_KEEPPRINTEDJOBS),
+        ATTRIBUTE_PRINTER_ADD("LOCAL", PRINTER_ATTRIBUTE_LOCAL),
+        ATTRIBUTE_PRINTER_ADD("NETWORK", PRINTER_ATTRIBUTE_NETWORK),
+        ATTRIBUTE_PRINTER_ADD("PUBLISHED", PRINTER_ATTRIBUTE_PUBLISHED),
+        ATTRIBUTE_PRINTER_ADD("QUEUED", PRINTER_ATTRIBUTE_QUEUED),
+        ATTRIBUTE_PRINTER_ADD("RAW-ONLY", PRINTER_ATTRIBUTE_RAW_ONLY),
+        ATTRIBUTE_PRINTER_ADD("SHARED", PRINTER_ATTRIBUTE_SHARED),
+        ATTRIBUTE_PRINTER_ADD("OFFLINE", PRINTER_ATTRIBUTE_WORK_OFFLINE),
 #ifdef PRINTER_ATTRIBUTE_FAX
-    ATTRIBUTE_PRINTER_ADD("FAX", PRINTER_ATTRIBUTE_FAX);
+        ATTRIBUTE_PRINTER_ADD("FAX", PRINTER_ATTRIBUTE_FAX),
 #endif
-    // vista
 #ifdef PRINTER_ATTRIBUTE_FRIENDLY_NAME
-    ATTRIBUTE_PRINTER_ADD("FRIENDLY-NAME", PRINTER_ATTRIBUTE_FRIENDLY_NAME);
-    ATTRIBUTE_PRINTER_ADD("MACHINE", PRINTER_ATTRIBUTE_MACHINE);
-    ATTRIBUTE_PRINTER_ADD("PUSHED-USER", PRINTER_ATTRIBUTE_PUSHED_USER);
-    ATTRIBUTE_PRINTER_ADD("PUSHED-MACHINE", PRINTER_ATTRIBUTE_PUSHED_MACHINE);
+        ATTRIBUTE_PRINTER_ADD("FRIENDLY-NAME", PRINTER_ATTRIBUTE_FRIENDLY_NAME),
+        ATTRIBUTE_PRINTER_ADD("MACHINE", PRINTER_ATTRIBUTE_MACHINE),
+        ATTRIBUTE_PRINTER_ADD("PUSHED-USER", PRINTER_ATTRIBUTE_PUSHED_USER),
+        ATTRIBUTE_PRINTER_ADD("PUSHED-MACHINE", PRINTER_ATTRIBUTE_PUSHED_MACHINE),
 #endif
-    // server 2003
 #ifdef PRINTER_ATTRIBUTE_TS
-    ATTRIBUTE_PRINTER_ADD("TS", PRINTER_ATTRIBUTE_TS);
+        ATTRIBUTE_PRINTER_ADD("TS", PRINTER_ATTRIBUTE_TS),
 #endif
 #undef ATTRIBUTE_PRINTER_ADD
-    return result;
+    };
+    return map;
 }
 
-const PaperSizeMapType &getPaperSizeMap()
+const NameToFlagMap &getJobStatusMap()
 {
-    static PaperSizeMapType result;
-    if (!result.empty())
+    static const NameToFlagMap map = {
+#define JOB_STATUS_ADD(value, type) {value, type}
+        JOB_STATUS_ADD("BLOCKED-DEVQ", JOB_STATUS_BLOCKED_DEVQ),
+        JOB_STATUS_ADD("DELETED", JOB_STATUS_DELETED),
+        JOB_STATUS_ADD("DELETING", JOB_STATUS_DELETING),
+        JOB_STATUS_ADD("ERROR", JOB_STATUS_ERROR),
+        JOB_STATUS_ADD("OFFLINE", JOB_STATUS_OFFLINE),
+        JOB_STATUS_ADD("PAPEROUT", JOB_STATUS_PAPEROUT),
+        JOB_STATUS_ADD("PAUSED", JOB_STATUS_PAUSED),
+        JOB_STATUS_ADD("PRINTED", JOB_STATUS_PRINTED),
+        JOB_STATUS_ADD("PRINTING", JOB_STATUS_PRINTING),
+        JOB_STATUS_ADD("RESTART", JOB_STATUS_RESTART),
+        JOB_STATUS_ADD("SPOOLING", JOB_STATUS_SPOOLING),
+        JOB_STATUS_ADD("USER-INTERVENTION", JOB_STATUS_USER_INTERVENTION),
+#ifdef JOB_STATUS_COMPLETE
+        JOB_STATUS_ADD("COMPLETE", JOB_STATUS_COMPLETE),
+#endif
+#ifdef JOB_STATUS_RETAINED
+        JOB_STATUS_ADD("RETAINED", JOB_STATUS_RETAINED),
+#endif
+#undef JOB_STATUS_ADD
+    };
+    return map;
+}
+
+/** Canonical short paper names, one entry per DMPAPER_* constant. */
+const NameToFlagMap &getPaperSizeMap()
+{
+    static const NameToFlagMap map = {
+#define PAPER(value, type) {value, type}
+        PAPER("LETTER", DMPAPER_LETTER),
+        PAPER("LETTER_SMALL", DMPAPER_LETTERSMALL),
+        PAPER("TABLOID", DMPAPER_TABLOID),
+        PAPER("LEDGER", DMPAPER_LEDGER),
+        PAPER("LEGAL", DMPAPER_LEGAL),
+        PAPER("STATEMENT", DMPAPER_STATEMENT),
+        PAPER("EXECUTIVE", DMPAPER_EXECUTIVE),
+        PAPER("A3", DMPAPER_A3),
+        PAPER("A4", DMPAPER_A4),
+        PAPER("A4_SMALL", DMPAPER_A4SMALL),
+        PAPER("A5", DMPAPER_A5),
+        PAPER("B4", DMPAPER_B4),
+        PAPER("B5", DMPAPER_B5),
+        PAPER("FOLIO", DMPAPER_FOLIO),
+        PAPER("QUARTO", DMPAPER_QUARTO),
+        PAPER("10X14", DMPAPER_10X14),
+        PAPER("11X17", DMPAPER_11X17),
+        PAPER("NOTE", DMPAPER_NOTE),
+        PAPER("ENV_9", DMPAPER_ENV_9),
+        PAPER("ENV_10", DMPAPER_ENV_10),
+        PAPER("ENV_11", DMPAPER_ENV_11),
+        PAPER("ENV_12", DMPAPER_ENV_12),
+        PAPER("ENV_14", DMPAPER_ENV_14),
+        PAPER("CSHEET", DMPAPER_CSHEET),
+        PAPER("DSHEET", DMPAPER_DSHEET),
+        PAPER("ESHEET", DMPAPER_ESHEET),
+        PAPER("ENV_DL", DMPAPER_ENV_DL),
+        PAPER("ENV_C5", DMPAPER_ENV_C5),
+        PAPER("ENV_C3", DMPAPER_ENV_C3),
+        PAPER("ENV_C4", DMPAPER_ENV_C4),
+        PAPER("ENV_C6", DMPAPER_ENV_C6),
+        PAPER("ENV_C65", DMPAPER_ENV_C65),
+        PAPER("ENV_B4", DMPAPER_ENV_B4),
+        PAPER("ENV_B5", DMPAPER_ENV_B5),
+        PAPER("ENV_B6", DMPAPER_ENV_B6),
+        PAPER("ENV_ITALY", DMPAPER_ENV_ITALY),
+        PAPER("ENV_MONARCH", DMPAPER_ENV_MONARCH),
+        PAPER("ENV_PERSONAL", DMPAPER_ENV_PERSONAL),
+        PAPER("FANFOLD_US", DMPAPER_FANFOLD_US),
+        PAPER("FANFOLD_STD_GERMAN", DMPAPER_FANFOLD_STD_GERMAN),
+        PAPER("FANFOLD_LGL_GERMAN", DMPAPER_FANFOLD_LGL_GERMAN),
+        PAPER("ISO_B4", DMPAPER_ISO_B4),
+        PAPER("JAPANESE_POSTCARD", DMPAPER_JAPANESE_POSTCARD),
+        PAPER("9X11", DMPAPER_9X11),
+        PAPER("10X11", DMPAPER_10X11),
+        PAPER("15X11", DMPAPER_15X11),
+        PAPER("ENV_INVITE", DMPAPER_ENV_INVITE),
+        PAPER("LETTER_EXTRA", DMPAPER_LETTER_EXTRA),
+        PAPER("LEGAL_EXTRA", DMPAPER_LEGAL_EXTRA),
+        PAPER("TABLOID_EXTRA", DMPAPER_TABLOID_EXTRA),
+        PAPER("A4_EXTRA", DMPAPER_A4_EXTRA),
+        PAPER("LETTER_TRANSVERSE", DMPAPER_LETTER_TRANSVERSE),
+        PAPER("A4_TRANSVERSE", DMPAPER_A4_TRANSVERSE),
+        PAPER("LETTER_EXTRA_TRANSVERSE", DMPAPER_LETTER_EXTRA_TRANSVERSE),
+        PAPER("A_PLUS", DMPAPER_A_PLUS),
+        PAPER("B_PLUS", DMPAPER_B_PLUS),
+        PAPER("LETTER_PLUS", DMPAPER_LETTER_PLUS),
+        PAPER("A4_PLUS", DMPAPER_A4_PLUS),
+        PAPER("A5_TRANSVERSE", DMPAPER_A5_TRANSVERSE),
+        PAPER("B5_TRANSVERSE", DMPAPER_B5_TRANSVERSE),
+        PAPER("A3_EXTRA", DMPAPER_A3_EXTRA),
+        PAPER("A5_EXTRA", DMPAPER_A5_EXTRA),
+        PAPER("B5_EXTRA", DMPAPER_B5_EXTRA),
+        PAPER("A2", DMPAPER_A2),
+        PAPER("A3_TRANSVERSE", DMPAPER_A3_TRANSVERSE),
+        PAPER("A3_EXTRA_TRANSVERSE", DMPAPER_A3_EXTRA_TRANSVERSE),
+        PAPER("DBL_JAPANESE_POSTCARD", DMPAPER_DBL_JAPANESE_POSTCARD),
+        PAPER("A6", DMPAPER_A6),
+        PAPER("JENV_KAKU2", DMPAPER_JENV_KAKU2),
+        PAPER("JENV_KAKU3", DMPAPER_JENV_KAKU3),
+        PAPER("JENV_CHOU3", DMPAPER_JENV_CHOU3),
+        PAPER("JENV_CHOU4", DMPAPER_JENV_CHOU4),
+        PAPER("LETTER_ROTATED", DMPAPER_LETTER_ROTATED),
+        PAPER("A3_ROTATED", DMPAPER_A3_ROTATED),
+        PAPER("A4_ROTATED", DMPAPER_A4_ROTATED),
+        PAPER("A5_ROTATED", DMPAPER_A5_ROTATED),
+        PAPER("B4_JIS_ROTATED", DMPAPER_B4_JIS_ROTATED),
+        PAPER("B5_JIS_ROTATED", DMPAPER_B5_JIS_ROTATED),
+        PAPER("JAPANESE_POSTCARD_ROTATED", DMPAPER_JAPANESE_POSTCARD_ROTATED),
+        PAPER("DBL_JAPANESE_POSTCARD_ROTATED", DMPAPER_DBL_JAPANESE_POSTCARD_ROTATED),
+        PAPER("A6_ROTATED", DMPAPER_A6_ROTATED),
+        PAPER("JENV_KAKU2_ROTATED", DMPAPER_JENV_KAKU2_ROTATED),
+        PAPER("JENV_KAKU3_ROTATED", DMPAPER_JENV_KAKU3_ROTATED),
+        PAPER("JENV_CHOU3_ROTATED", DMPAPER_JENV_CHOU3_ROTATED),
+        PAPER("JENV_CHOU4_ROTATED", DMPAPER_JENV_CHOU4_ROTATED),
+        PAPER("B6_JIS", DMPAPER_B6_JIS),
+        PAPER("B6_JIS_ROTATED", DMPAPER_B6_JIS_ROTATED),
+        PAPER("12X11", DMPAPER_12X11),
+        PAPER("JENV_YOU4", DMPAPER_JENV_YOU4),
+        PAPER("JENV_YOU4_ROTATED", DMPAPER_JENV_YOU4_ROTATED),
+        PAPER("P16K", DMPAPER_P16K),
+        PAPER("P32K", DMPAPER_P32K),
+        PAPER("P32KBIG", DMPAPER_P32KBIG),
+        PAPER("PENV_1", DMPAPER_PENV_1),
+        PAPER("PENV_2", DMPAPER_PENV_2),
+        PAPER("PENV_3", DMPAPER_PENV_3),
+        PAPER("PENV_4", DMPAPER_PENV_4),
+        PAPER("PENV_5", DMPAPER_PENV_5),
+        PAPER("PENV_6", DMPAPER_PENV_6),
+        PAPER("PENV_7", DMPAPER_PENV_7),
+        PAPER("PENV_8", DMPAPER_PENV_8),
+        PAPER("PENV_9", DMPAPER_PENV_9),
+        PAPER("PENV_10", DMPAPER_PENV_10),
+        PAPER("P16K_ROTATED", DMPAPER_P16K_ROTATED),
+        PAPER("P32K_ROTATED", DMPAPER_P32K_ROTATED),
+        PAPER("P32KBIG_ROTATED", DMPAPER_P32KBIG_ROTATED),
+        PAPER("PENV_1_ROTATED", DMPAPER_PENV_1_ROTATED),
+        PAPER("PENV_2_ROTATED", DMPAPER_PENV_2_ROTATED),
+        PAPER("PENV_3_ROTATED", DMPAPER_PENV_3_ROTATED),
+        PAPER("PENV_4_ROTATED", DMPAPER_PENV_4_ROTATED),
+        PAPER("PENV_5_ROTATED", DMPAPER_PENV_5_ROTATED),
+        PAPER("PENV_6_ROTATED", DMPAPER_PENV_6_ROTATED),
+        PAPER("PENV_7_ROTATED", DMPAPER_PENV_7_ROTATED),
+        PAPER("PENV_8_ROTATED", DMPAPER_PENV_8_ROTATED),
+        PAPER("PENV_9_ROTATED", DMPAPER_PENV_9_ROTATED),
+        PAPER("PENV_10_ROTATED", DMPAPER_PENV_10_ROTATED),
+#undef PAPER
+    };
+    return map;
+}
+
+/** DMBIN_* feed bins. */
+const NameToFlagMap &getPaperSourceMap()
+{
+    static const NameToFlagMap map = {
+#define SOURCE(value, type) {value, type}
+        SOURCE("Auto", DMBIN_AUTO),
+        SOURCE("Tray 1", DMBIN_UPPER),
+        SOURCE("Tray 2", DMBIN_LOWER),
+        SOURCE("Middle", DMBIN_MIDDLE),
+        SOURCE("Manual", DMBIN_MANUAL),
+        SOURCE("Envelope", DMBIN_ENVELOPE),
+        SOURCE("Envelope Manual", DMBIN_ENVMANUAL),
+        SOURCE("Tractor", DMBIN_TRACTOR),
+        SOURCE("Small Format", DMBIN_SMALLFMT),
+        SOURCE("Large Format", DMBIN_LARGEFMT),
+        SOURCE("Large Capacity", DMBIN_LARGECAPACITY),
+        SOURCE("Cassette", DMBIN_CASSETTE),
+        SOURCE("Form Source", DMBIN_FORMSOURCE),
+        SOURCE("Custom", DMBIN_USER),
+#undef SOURCE
+    };
+    return map;
+}
+
+/** DMMEDIA_* media types. */
+const NameToFlagMap &getMediaTypeMap()
+{
+    static const NameToFlagMap map = {
+#define MEDIA(value, type) {value, type}
+        MEDIA("Plain", DMMEDIA_STANDARD),
+        MEDIA("Transparency", DMMEDIA_TRANSPARENCY),
+        MEDIA("Glossy", DMMEDIA_GLOSSY),
+        MEDIA("User", DMMEDIA_USER),
+#undef MEDIA
+    };
+    return map;
+}
+
+/* ------------------------------------------------------------------ */
+/* print formats and job commands                                      */
+/* ------------------------------------------------------------------ */
+
+const std::vector<std::string> &winSupportedPrintFormats()
+{
+    static const std::vector<std::string> formats = {"RAW", "TEXT", "XPS_PASS", "PDF", "POSTSCRIPT"};
+    return formats;
+}
+
+bool isSupportedPrintFormat(const std::string &upperType)
+{
+    const std::vector<std::string> &formats = winSupportedPrintFormats();
+    for (size_t i = 0; i < formats.size(); ++i)
     {
-        return result;
+        if (formats[i] == upperType)
+        {
+            return true;
+        }
     }
-    // add only first time
-#define PAPERSIZE_PRINTER_ADD(type, value) result.insert(std::make_pair(type, value))
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A4, "A4");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LETTER, "Letter 8 1/2 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LETTERSMALL, "Letter Small 8 1/2 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_TABLOID, "Tabloid 11 x 17 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LEDGER, "Ledger 17 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LEGAL, "Legal 8 1/2 x 14 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_STATEMENT, "Statement 5 1/2 x 8 1/2 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_EXECUTIVE, "Executive 7 1/4 x 10 1/2 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A3, "A3 297 x 420 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A4, "A4 210 x 297 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A4SMALL, "A4 Small 210 x 297 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A5, "A5 148 x 210 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B4, "B4 (JIS) 250 x 354");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B5, "B5 (JIS) 182 x 257 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_FOLIO, "Folio 8 1/2 x 13 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_QUARTO, "Quarto 215 x 275 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_10X14, "10x14 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_11X17, "11x17 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_NOTE, "Note 8 1/2 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_9, "Envelope #9 3 7/8 x 8 7/8");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_10, "Envelope #10 4 1/8 x 9 1/2");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_11, "Envelope #11 4 1/2 x 10 3/8");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_12, "Envelope #12 4 \276 x 11");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_14, "Envelope #14 5 x 11 1/2");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_CSHEET, "C size sheet");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_DSHEET, "D size sheet");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ESHEET, "E size sheet");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_DL, "Envelope DL 110 x 220mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_C5, "Envelope C5 162 x 229 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_C3, "Envelope C3  324 x 458 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_C4, "Envelope C4  229 x 324 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_C6, "Envelope C6  114 x 162 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_C65, "Envelope C65 114 x 229 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_B4, "Envelope B4  250 x 353 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_B5, "Envelope B5  176 x 250 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_B6, "Envelope B6  176 x 125 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_ITALY, "Envelope 110 x 230 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_MONARCH, "Envelope Monarch 3.875 x 7.5 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_PERSONAL, "6 3/4 Envelope 3 5/8 x 6 1/2 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_FANFOLD_US, "US Std Fanfold 14 7/8 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_FANFOLD_STD_GERMAN, "German Std Fanfold 8 1/2 x 12 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_FANFOLD_LGL_GERMAN, "German Legal Fanfold 8 1/2 x 13 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ISO_B4, "B4 (ISO) 250 x 353 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JAPANESE_POSTCARD, "Japanese Postcard 100 x 148 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_9X11, "9 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_10X11, "10 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_15X11, "15 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_ENV_INVITE, "Envelope Invite 220 x 220 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_RESERVED_48, "RESERVED--DO NOT USE");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_RESERVED_49, "RESERVED--DO NOT USE");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LETTER_EXTRA, "Letter Extra 9 \275 x 12 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LEGAL_EXTRA, "Legal Extra 9 \275 x 15 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_TABLOID_EXTRA, "Tabloid Extra 11.69 x 18 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A4_EXTRA, "A4 Extra 9.27 x 12.69 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LETTER_TRANSVERSE, "Letter Transverse 8 \275 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A4_TRANSVERSE, "A4 Transverse 210 x 297 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LETTER_EXTRA_TRANSVERSE, "Letter Extra Transverse 9\275 x 12 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A_PLUS, "SuperA/SuperA/A4 227 x 356 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B_PLUS, "SuperB/SuperB/A3 305 x 487 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LETTER_PLUS, "Letter Plus 8.5 x 12.69 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A4_PLUS, "A4 Plus 210 x 330 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A5_TRANSVERSE, "A5 Transverse 148 x 210 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B5_TRANSVERSE, "B5 (JIS) Transverse 182 x 257 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A3_EXTRA, "A3 Extra 322 x 445 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A5_EXTRA, "A5 Extra 174 x 235 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B5_EXTRA, "B5 (ISO) Extra 201 x 276 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A2, "A2 420 x 594 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A3_TRANSVERSE, "A3 Transverse 297 x 420 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A3_EXTRA_TRANSVERSE, "A3 Extra Transverse 322 x 445 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_DBL_JAPANESE_POSTCARD, "Japanese Double Postcard 200 x 148 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A6, "A6 105 x 148 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_KAKU2, "Japanese Envelope Kaku #2");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_KAKU3, "Japanese Envelope Kaku #3");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_CHOU3, "Japanese Envelope Chou #3");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_CHOU4, "Japanese Envelope Chou #4");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_LETTER_ROTATED, "Letter Rotated 11 x 8 1/2 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A3_ROTATED, "A3 Rotated 420 x 297 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A4_ROTATED, "A4 Rotated 297 x 210 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A5_ROTATED, "A5 Rotated 210 x 148 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B4_JIS_ROTATED, "B4 (JIS) Rotated 364 x 257 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B5_JIS_ROTATED, "B5 (JIS) Rotated 257 x 182 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JAPANESE_POSTCARD_ROTATED, "apanese Postcard Rotated 148 x 100 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_DBL_JAPANESE_POSTCARD_ROTATED, "ouble Japanese Postcard Rotated 148 x 200 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_A6_ROTATED, "A6 Rotated 148 x 105 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_KAKU2_ROTATED, "Japanese Envelope Kaku #2 Rotated");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_KAKU3_ROTATED, "Japanese Envelope Kaku #3 Rotated");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_CHOU3_ROTATED, "Japanese Envelope Chou #3 Rotated");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_CHOU4_ROTATED, "Japanese Envelope Chou #4 Rotated");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B6_JIS, "B6 (JIS) 128 x 182 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_B6_JIS_ROTATED, "B6 (JIS) Rotated 182 x 128 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_12X11, "12 x 11 in");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_YOU4, "Japanese Envelope You #4");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_JENV_YOU4_ROTATED, "Japanese Envelope You #4 Rotate");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_P16K, "PRC 16K 146 x 215 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_P32K, "PRC 32K 97 x 151 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_P32KBIG, "PRC 32K(Big) 97 x 151 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_1, "PRC Envelope #1 102 x 165 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_2, "PRC Envelope #2 102 x 176 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_3, "PRC Envelope #3 125 x 176 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_4, "PRC Envelope #4 110 x 208 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_5, "PRC Envelope #5 110 x 220 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_6, "PRC Envelope #6 120 x 230 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_7, "PRC Envelope #7 160 x 230 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_8, "PRC Envelope #8 120 x 309 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_9, "PRC Envelope #9 229 x 324 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_10, "PRC Envelope #10 324 x 458 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_P16K_ROTATED, "RC 16K Rotated");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_P32K_ROTATED, "RC 32K Rotated");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_P32KBIG_ROTATED, "RC 32K(Big) Rotated");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_1_ROTATED, "PRC Envelope #1 Rotated 165 x 102 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_2_ROTATED, "PRC Envelope #2 Rotated 176 x 102 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_3_ROTATED, "PRC Envelope #3 Rotated 176 x 125 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_4_ROTATED, "PRC Envelope #4 Rotated 208 x 110 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_5_ROTATED, "PRC Envelope #5 Rotated 220 x 110 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_6_ROTATED, "PRC Envelope #6 Rotated 230 x 120 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_7_ROTATED, "PRC Envelope #7 Rotated 230 x 160 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_8_ROTATED, "PRC Envelope #8 Rotated 309 x 120 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_9_ROTATED, "PRC Envelope #9 Rotated 324 x 229 mm");
-    PAPERSIZE_PRINTER_ADD(DMPAPER_PENV_10_ROTATED, "PRC Envelope #10 Rotated 458 x 324 mm");
-#undef ATTRIBUTE_PRINTER_ADD
+    return false;
+}
+
+std::string unsupportedPrintFormatError(const std::string &type)
+{
+    return "unsupported print format \"" + type + "\"; supported formats are " +
+           joinList(winSupportedPrintFormats());
+}
+
+std::string unsupportedJobCommandError(const std::string &command)
+{
+    return "unsupported job command \"" + command + "\"; supported commands are " +
+           joinList(allJobCommands());
+}
+
+/** Normalised command -> JOB_CONTROL_*; false for commands this SDK lacks. */
+bool resolveJobCommand(const std::string &command, DWORD &control)
+{
+    if (command == "CANCEL")
+    {
+        control = JOB_CONTROL_CANCEL;
+        return true;
+    }
+    if (command == "PAUSE" || command == "HOLD") // alias
+    {
+        control = JOB_CONTROL_PAUSE;
+        return true;
+    }
+    if (command == "RESUME" || command == "RELEASE") // alias
+    {
+        control = JOB_CONTROL_RESUME;
+        return true;
+    }
+    if (command == "RESTART")
+    {
+        control = JOB_CONTROL_RESTART;
+        return true;
+    }
+    if (command == "DELETE")
+    {
+        control = JOB_CONTROL_DELETE;
+        return true;
+    }
+#ifdef JOB_CONTROL_RETAIN
+    if (command == "RETAIN")
+    {
+        control = JOB_CONTROL_RETAIN;
+        return true;
+    }
+#endif
+#ifdef JOB_CONTROL_SENT_TO_PRINTER
+    if (command == "SENT-TO-PRINTER")
+    {
+        control = JOB_CONTROL_SENT_TO_PRINTER;
+        return true;
+    }
+#endif
+#ifdef JOB_CONTROL_LAST_PAGE_EJECTED
+    if (command == "LAST-PAGE-EJECTED")
+    {
+        control = JOB_CONTROL_LAST_PAGE_EJECTED;
+        return true;
+    }
+#endif
+    return false;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* win32 status -> canonical state                                     */
+/* ------------------------------------------------------------------ */
+
+/** PRINTER_STATUS_* -> idle|processing|stopped|unknown */
+std::string printerState(DWORD status)
+{
+    const DWORD stopped = PRINTER_STATUS_PAUSED | PRINTER_STATUS_ERROR | PRINTER_STATUS_OFFLINE |
+                          PRINTER_STATUS_NOT_AVAILABLE | PRINTER_STATUS_PENDING_DELETION |
+                          PRINTER_STATUS_SERVER_UNKNOWN;
+    const DWORD processing = PRINTER_STATUS_PRINTING | PRINTER_STATUS_PROCESSING |
+                             PRINTER_STATUS_BUSY | PRINTER_STATUS_IO_ACTIVE |
+                             PRINTER_STATUS_WARMING_UP | PRINTER_STATUS_INITIALIZING;
+    const DWORD idle = PRINTER_STATUS_WAITING | PRINTER_STATUS_POWER_SAVE;
+
+    if ((status & stopped) != 0)
+    {
+        return "stopped";
+    }
+    if ((status & processing) != 0)
+    {
+        return "processing";
+    }
+    if ((status & idle) != 0 || status == 0)
+    {
+        return "idle";
+    }
+    return "unknown";
+}
+
+/** A queue takes jobs unless it is offline, paused or in error. */
+bool printerAcceptsJobs(DWORD attributes, DWORD status)
+{
+    if ((attributes & PRINTER_ATTRIBUTE_WORK_OFFLINE) != 0)
+    {
+        return false;
+    }
+
+    const DWORD blocking = PRINTER_STATUS_PAUSED | PRINTER_STATUS_OFFLINE |
+                           PRINTER_STATUS_NOT_AVAILABLE | PRINTER_STATUS_PENDING_DELETION |
+                           PRINTER_STATUS_ERROR | PRINTER_STATUS_SERVER_UNKNOWN;
+    return (status & blocking) == 0;
+}
+
+/** JOB_STATUS_* -> pending|processing|held|stopped|canceled|aborted|completed|unknown */
+std::string jobState(DWORD status)
+{
+#if defined(JOB_STATUS_COMPLETE)
+    const DWORD completed = JOB_STATUS_PRINTED | JOB_STATUS_COMPLETE;
+#else
+    const DWORD completed = JOB_STATUS_PRINTED;
+#endif
+    const DWORD canceled = JOB_STATUS_DELETED | JOB_STATUS_DELETING;
+    const DWORD stopped = JOB_STATUS_OFFLINE | JOB_STATUS_BLOCKED_DEVQ |
+                          JOB_STATUS_USER_INTERVENTION | JOB_STATUS_PAPEROUT;
+
+    if ((status & completed) != 0)
+    {
+        return "completed";
+    }
+    if ((status & canceled) != 0)
+    {
+        return "canceled";
+    }
+    if ((status & JOB_STATUS_PAUSED) != 0)
+    {
+        return "held";
+    }
+    if ((status & stopped) != 0)
+    {
+        return "stopped";
+    }
+    if ((status & JOB_STATUS_ERROR) != 0)
+    {
+        return "aborted";
+    }
+    if ((status & JOB_STATUS_PRINTING) != 0)
+    {
+        return "processing";
+    }
+    if ((status & (JOB_STATUS_SPOOLING | JOB_STATUS_RESTART)) != 0)
+    {
+        return "pending";
+    }
+    return "unknown";
+}
+
+/** Finished or cancelled jobs, dropped when the caller asked only for pending ones. */
+bool isFinishedJob(DWORD status)
+{
+#if defined(JOB_STATUS_COMPLETE)
+    const DWORD finished = JOB_STATUS_PRINTED | JOB_STATUS_COMPLETE;
+#else
+    const DWORD finished = JOB_STATUS_PRINTED;
+#endif
+    return (status & (finished | JOB_STATUS_DELETED | JOB_STATUS_DELETING)) != 0;
+}
+
+/** pStatus text when the driver supplies one, canonical flags otherwise. */
+std::string jobStatusText(const wchar_t *statusText, DWORD status)
+{
+    std::string text = wideToUtf8(statusText);
+    if (!text.empty())
+    {
+        return text;
+    }
+    return joinList(flagsToNames(status, getJobStatusMap()));
+}
+
+/* ------------------------------------------------------------------ */
+/* FILETIME / SYSTEMTIME -> milliseconds since the unix epoch          */
+/* ------------------------------------------------------------------ */
+
+/** 0 -> -1 (unknown); ticks are 100 ns since 1601-01-01. */
+double fileTimeToUnixMilliseconds(const FILETIME &time)
+{
+    ULARGE_INTEGER value;
+    value.LowPart = time.dwLowDateTime;
+    value.HighPart = time.dwHighDateTime;
+    if (value.QuadPart == 0)
+    {
+        return -1.0;
+    }
+
+    const unsigned long long epochDifference = 116444736000000000ULL; // 1601 -> 1970
+    if (value.QuadPart < epochDifference)
+    {
+        return -1.0;
+    }
+    return static_cast<double>(value.QuadPart - epochDifference) / 10000.0;
+}
+
+double systemTimeToUnixMilliseconds(const SYSTEMTIME &time)
+{
+    if (time.wYear == 0)
+    {
+        return -1.0;
+    }
+
+    FILETIME fileTime;
+    if (!SystemTimeToFileTime(&time, &fileTime))
+    {
+        return -1.0;
+    }
+    return fileTimeToUnixMilliseconds(fileTime);
+}
+
+/* ------------------------------------------------------------------ */
+/* struct mapping                                                      */
+/* ------------------------------------------------------------------ */
+
+void fillJobInfo(const JOB_INFO_2W &source, const std::string &fallbackPrinterName, JobInfo &job)
+{
+    job.id = static_cast<int>(source.JobId);
+    job.name = wideToUtf8(source.pDocument);
+    job.printerName = source.pPrinterName != NULL ? wideToUtf8(source.pPrinterName)
+                                                 : fallbackPrinterName;
+    job.user = wideToUtf8(source.pUserName);
+    job.format = wideToUtf8(source.pDatatype);
+    job.state = jobState(source.Status);
+    job.status = jobStatusText(source.pStatus, source.Status);
+    job.statusArray = flagsToNames(source.Status, getJobStatusMap());
+    job.priority = static_cast<int>(source.Priority);
+    job.size = static_cast<double>(source.Size);
+    job.position = static_cast<int>(source.Position);
+    job.totalPages = static_cast<int>(source.TotalPages);
+    job.pagesPrinted = static_cast<int>(source.PagesPrinted);
+    job.submittedTime = systemTimeToUnixMilliseconds(source.Submitted);
+    job.completedTime = -1.0;
+    job.processingTime = -1.0;
+
+    // Time is the number of seconds elapsed since the job started spooling, it
+    // only makes sense once the job is done.
+    if (source.Time > 0 && isFinishedJob(source.Status) && job.submittedTime >= 0)
+    {
+        job.completedTime = job.submittedTime + (static_cast<double>(source.Time) * 1000.0);
+    }
+}
+
+void fillJobInfo(const JOB_INFO_1W &source, const std::string &fallbackPrinterName, JobInfo &job)
+{
+    job.id = static_cast<int>(source.JobId);
+    job.name = wideToUtf8(source.pDocument);
+    job.printerName = source.pPrinterName != NULL ? wideToUtf8(source.pPrinterName)
+                                                 : fallbackPrinterName;
+    job.user = wideToUtf8(source.pUserName);
+    job.format = wideToUtf8(source.pDatatype);
+    job.state = jobState(source.Status);
+    job.status = jobStatusText(source.pStatus, source.Status);
+    job.statusArray = flagsToNames(source.Status, getJobStatusMap());
+    job.priority = static_cast<int>(source.Priority);
+    job.size = 0.0; // JOB_INFO_1W carries no byte size
+    job.position = static_cast<int>(source.Position);
+    job.totalPages = static_cast<int>(source.TotalPages);
+    job.pagesPrinted = static_cast<int>(source.PagesPrinted);
+    job.submittedTime = systemTimeToUnixMilliseconds(source.Submitted);
+    job.completedTime = -1.0;
+    job.processingTime = -1.0;
+}
+
+/** The default queue name, empty when none is configured; never fails. */
+std::string fetchDefaultPrinterName()
+{
+    DWORD size = 0;
+    GetDefaultPrinterW(NULL, &size);
+    if (size == 0)
+    {
+        return std::string();
+    }
+
+    std::wstring buffer(static_cast<size_t>(size), L'\0');
+    DWORD capacity = size;
+    if (!GetDefaultPrinterW(&buffer[0], &capacity))
+    {
+        return std::string();
+    }
+    return wideToUtf8(buffer.c_str());
+}
+
+void fillPrinterInfo(const PRINTER_INFO_2W &source, const std::string &defaultPrinterName,
+                     PrinterInfo &printer)
+{
+    printer.name = wideToUtf8(source.pPrinterName);
+    printer.instance = std::string(); // CUPS only
+    printer.server = isLocalServerName(source.pServerName) ? std::string()
+                                                           : wideToUtf8(source.pServerName);
+    printer.shareName = wideToUtf8(source.pShareName);
+    printer.portName = wideToUtf8(source.pPortName);
+    printer.driverName = wideToUtf8(source.pDriverName);
+    printer.location = wideToUtf8(source.pLocation);
+    printer.comment = wideToUtf8(source.pComment);
+    printer.uri = "winspool://" + printer.portName; // best effort device identifier
+    printer.state = printerState(source.Status);
+    printer.isDefault = !printer.name.empty() &&
+                        equalsIgnoreCase(utf8ToWide(printer.name), utf8ToWide(defaultPrinterName));
+    printer.isShared = (source.Attributes & PRINTER_ATTRIBUTE_SHARED) != 0;
+    printer.isLocal = (source.Attributes & PRINTER_ATTRIBUTE_LOCAL) != 0;
+    printer.acceptsJobs = printerAcceptsJobs(source.Attributes, source.Status);
+    printer.status = static_cast<int>(source.Status);
+    printer.statusArray = flagsToNames(source.Status, getPrinterStatusMap());
+    printer.attributes = static_cast<int>(source.Attributes);
+    printer.attributeArray = flagsToNames(source.Attributes, getPrinterAttributeMap());
+    printer.averagePPM = static_cast<int>(source.AveragePPM);
+    printer.cJobs = static_cast<int>(source.cJobs);
+    printer.defaultPriority = static_cast<int>(source.DefaultPriority);
+    printer.startTime = static_cast<int>(source.StartTime);
+    printer.untilTime = static_cast<int>(source.UntilTime);
+    printer.options.clear();
+}
+
+/* ------------------------------------------------------------------ */
+/* spooler document writer                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * StartDocPrinterW / StartPagePrinter / WritePrinter / EndPagePrinter /
+ * EndDocPrinter with RAII clean up: whatever happens, an open page and document
+ * are closed before the printer handle is released.
+ */
+class SpoolJobWriter
+{
+public:
+    SpoolJobWriter()
+        : _printer(NULL), _jobId(0), _pageOpen(false), _documentOpen(false)
+    {
+    }
+
+    ~SpoolJobWriter() { closeDocument(); }
+
+    void attach(HANDLE printer) { _printer = printer; }
+
+    bool startDocument(const std::wstring &documentName, const std::wstring &dataType)
+    {
+        DOC_INFO_1W info;
+        info.pDocName = const_cast<LPWSTR>(documentName.c_str());
+        info.pOutputFile = NULL;
+        info.pDatatype = const_cast<LPWSTR>(dataType.c_str());
+
+        _jobId = StartDocPrinterW(_printer, 1, reinterpret_cast<LPBYTE>(&info));
+        if (_jobId == 0)
+        {
+            return false;
+        }
+        _documentOpen = true;
+        return true;
+    }
+
+    bool startPage()
+    {
+        if (_pageOpen)
+        {
+            return true;
+        }
+        if (!StartPagePrinter(_printer))
+        {
+            return false;
+        }
+        _pageOpen = true;
+        return true;
+    }
+
+    bool endPage()
+    {
+        if (!_pageOpen)
+        {
+            return true;
+        }
+        _pageOpen = false;
+        return EndPagePrinter(_printer) != FALSE;
+    }
+
+    bool endDocument()
+    {
+        if (!endPage())
+        {
+            return false;
+        }
+        if (!_documentOpen)
+        {
+            return true;
+        }
+        _documentOpen = false;
+        return EndDocPrinter(_printer) != FALSE;
+    }
+
+    /** Buffers of any size, spooled in at most 1 MB chunks (WritePrinter is 32 bit). */
+    bool writeChunked(const char *data, size_t length, std::string &error)
+    {
+        const size_t chunkSize = 1024 * 1024;
+        size_t offset = 0;
+
+        while (offset < length)
+        {
+            const size_t remaining = length - offset;
+            const DWORD chunk =
+                static_cast<DWORD>(remaining < chunkSize ? remaining : chunkSize);
+            DWORD written = 0;
+            if (!WritePrinter(_printer, const_cast<char *>(data + offset), chunk, &written))
+            {
+                error = errorWithCode("WritePrinter failed", GetLastError());
+                return false;
+            }
+            if (written != chunk)
+            {
+                std::ostringstream stream;
+                stream << "WritePrinter wrote only " << written << " of " << chunk << " bytes";
+                error = stream.str();
+                return false;
+            }
+            offset += chunk;
+        }
+        return true;
+    }
+
+    DWORD jobId() const { return _jobId; }
+
+    /** Closes an open page/document, ignoring errors: used on the error paths. */
+    void closeDocument()
+    {
+        if (_pageOpen)
+        {
+            _pageOpen = false;
+            EndPagePrinter(_printer);
+        }
+        if (_documentOpen)
+        {
+            _documentOpen = false;
+            EndDocPrinter(_printer);
+        }
+    }
+
+private:
+    SpoolJobWriter(const SpoolJobWriter &);
+    SpoolJobWriter &operator=(const SpoolJobWriter &);
+
+    HANDLE _printer;
+    DWORD _jobId;
+    bool _pageOpen;
+    bool _documentOpen;
+};
+
+
+/* ------------------------------------------------------------------ */
+/* driver data value rendering                                         */
+/* ------------------------------------------------------------------ */
+
+std::string bytesToHex(const BYTE *data, DWORD size)
+{
+    static const char digits[] = "0123456789abcdef";
+    std::string result;
+    for (DWORD i = 0; i < size; ++i)
+    {
+        if (i != 0)
+        {
+            result += " ";
+        }
+        result += "0x";
+        result += digits[(data[i] >> 4) & 0x0f];
+        result += digits[data[i] & 0x0f];
+    }
     return result;
 }
 
-std::string getPaperSizeName(SHORT paperSize)
+/** PRINTER_ENUM_VALUESW data as text; strings are decoded as UTF-16. */
+std::string printerDataValueToString(const PRINTER_ENUM_VALUESW &value)
 {
-    if (auto search = getPaperSizeMap().find(paperSize); search != getPaperSizeMap().end())
-        return search->second;
+    switch (value.dwType)
+    {
+    case REG_SZ:
+    case REG_EXPAND_SZ:
+    case REG_MULTI_SZ:
+        return wideBufferToUtf8(value.pData, value.cbData);
+    case REG_DWORD:
+    {
+        if (value.pData == NULL || value.cbData < sizeof(DWORD))
+        {
+            return std::string();
+        }
+        DWORD number = 0;
+        std::memcpy(&number, value.pData, sizeof(number));
+        std::ostringstream stream;
+        stream << number;
+        return stream.str();
+    }
+    default:
+        if (value.pData == NULL || value.cbData == 0)
+        {
+            return std::string();
+        }
+        return bytesToHex(value.pData, value.cbData);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* the Windows implementation                                          */
+/* ------------------------------------------------------------------ */
+
+class WinPrinterManager : public PrinterManager
+{
+public:
+    virtual ~WinPrinterManager() {}
+
+    virtual std::string getPrinters(std::vector<PrinterInfo> &printers);
+    virtual std::string getDefaultPrinterName(PrinterName &printerName);
+    virtual std::string getOnePrinter(const PrinterName &name, PrinterInfo &printer);
+    virtual std::string getPrinterDevMode(const PrinterName &name, PrinterDevMode &devMode);
+    virtual std::string getPrinterDriverOptions(const PrinterName &name,
+                                                std::map<std::string, std::map<std::string, bool> > &options);
+    virtual std::string getJobs(const PrinterName &name, bool includeCompleted,
+                                std::vector<JobInfo> &jobs);
+    virtual std::string getOneJob(const PrinterName &name, int jobId, JobInfo &job);
+    virtual std::string setJob(const PrinterName &name, int jobId, const std::string &command,
+                               bool &done);
+    virtual std::string printDirect(const PrinterName &name, const std::string &docName,
+                                    const std::string &type, const std::string &data, int &jobId);
+    virtual std::string printFile(const PrinterName &name, const std::string &docName,
+                                  const std::string &type, const std::string &filename, int &jobId);
+    virtual std::vector<std::string> getSupportedPrintFormats();
+    virtual std::vector<std::string> getSupportedJobCommands();
+};
+
+std::string WinPrinterManager::getPrinters(std::vector<PrinterInfo> &printers)
+{
+    printers.clear();
+
+    std::vector<PRINTER_INFO_2W> buffer;
+    DWORD count = 0;
+    DWORD errorCode = 0;
+    auto enumerate = [](LPBYTE data, DWORD capacity, LPDWORD needed, LPDWORD returned) -> BOOL {
+        // local queues and connections: the spooler sees both
+        return EnumPrintersW(PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS, NULL, 2, data, capacity,
+                             needed, returned);
+    };
+
+    EnumerationResult result = growingEnumerate(buffer, count, enumerate, errorCode);
+    if (result == ENUMERATION_EMPTY)
+    {
+        return std::string(); // no queue is not an error
+    }
+    if (result == ENUMERATION_FAILED)
+    {
+        return errorWithCode("EnumPrintersW failed", errorCode);
+    }
+
+    const std::string defaultPrinterName = fetchDefaultPrinterName();
+    for (DWORD i = 0; i < count; ++i)
+    {
+        PrinterInfo printer;
+        fillPrinterInfo(buffer[i], defaultPrinterName, printer);
+        printers.push_back(printer);
+    }
+    return std::string();
+}
+
+std::string WinPrinterManager::getDefaultPrinterName(PrinterName &printerName)
+{
+    // An empty result with no error simply means "no default queue configured".
+    printerName = fetchDefaultPrinterName();
+    return std::string();
+}
+
+std::string WinPrinterManager::getOnePrinter(const PrinterName &name, PrinterInfo &printer)
+{
+    std::wstring wideName = utf8ToWide(name);
+    if (wideName.empty())
+    {
+        return "printer name must not be empty";
+    }
+
+    PrinterHandle handle;
+    if (!handle.open(wideName))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("OpenPrinterW(\"" + name + "\") failed", code);
+    }
+
+    std::vector<PRINTER_INFO_2W> buffer;
+    DWORD count = 0;
+    DWORD errorCode = 0;
+    HANDLE printerHandle = handle.get();
+    auto enumerate = [printerHandle](LPBYTE data, DWORD capacity, LPDWORD needed,
+                                     LPDWORD returned) -> BOOL {
+        BOOL ok = GetPrinterW(printerHandle, 2, data, capacity, needed);
+        if (ok && returned != NULL)
+        {
+            *returned = 1; // GetPrinterW reports no entry count
+        }
+        return ok;
+    };
+
+    EnumerationResult result = growingEnumerate(buffer, count, enumerate, errorCode);
+    if (result == ENUMERATION_FAILED)
+    {
+        return errorWithCode("GetPrinterW(\"" + name + "\") failed", errorCode);
+    }
+    if (result == ENUMERATION_EMPTY || count == 0)
+    {
+        return "printer \"" + name + "\" was not found";
+    }
+
+    fillPrinterInfo(buffer[0], fetchDefaultPrinterName(), printer);
+    return std::string();
+}
+
+std::string WinPrinterManager::getPrinterDevMode(const PrinterName &name, PrinterDevMode &devMode)
+{
+    std::wstring wideName = utf8ToWide(name);
+    if (wideName.empty())
+    {
+        return "printer name must not be empty";
+    }
+
+    PrinterHandle handle;
+    if (!handle.open(wideName))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("OpenPrinterW(\"" + name + "\") failed", code);
+    }
+
+    // DocumentPropertiesW(..., NULL, NULL, 0) returns the DEVMODE size, or a
+    // negative value when the driver cannot describe its defaults.
+    LONG size = DocumentPropertiesW(NULL, handle.get(), const_cast<LPWSTR>(wideName.c_str()), NULL,
+                                    NULL, 0);
+    if (size < 0)
+    {
+        return errorWithCode("DocumentPropertiesW could not size the DEVMODE of \"" + name + "\"",
+                             static_cast<DWORD>(size));
+    }
+    if (size == 0)
+    {
+        return "the driver of \"" + name + "\" exposes no DEVMODE";
+    }
+
+    std::vector<DEVMODEW> buffer = allocateStructures<DEVMODEW>(static_cast<DWORD>(size));
+    LONG filled = DocumentPropertiesW(NULL, handle.get(), const_cast<LPWSTR>(wideName.c_str()),
+                                      buffer.data(), NULL, DM_OUT_BUFFER);
+    if (filled != IDOK)
+    {
+        return errorWithCode("DocumentPropertiesW failed for \"" + name + "\"",
+                             static_cast<DWORD>(filled));
+    }
+
+    const DEVMODEW &source = buffer[0];
+    devMode.deviceName = name;
+    devMode.paperSize = nameForCode(static_cast<DWORD>(source.dmPaperSize), getPaperSizeMap());
+    devMode.paperSizeCode = static_cast<int>(source.dmPaperSize);
+    devMode.mediaType = nameForCode(static_cast<DWORD>(source.dmMediaType), getMediaTypeMap());
+    devMode.orientation = source.dmOrientation == DMORIENT_LANDSCAPE ? LANDSCAPE : PORTRAIT;
+
+    if (source.dmDuplex == DMDUP_VERTICAL)
+    {
+        devMode.duplex = VERTICAL;
+    }
+    else if (source.dmDuplex == DMDUP_HORIZONTAL)
+    {
+        devMode.duplex = HORIZONTAL;
+    }
+    else
+    {
+        devMode.duplex = SIMPLEX;
+    }
+
+    devMode.color = source.dmColor == DMCOLOR_COLOR ? COLOR : MONOCHROME;
+    devMode.copies = source.dmCopies > 0 ? static_cast<int>(source.dmCopies) : 1;
+    devMode.collate = source.dmCollate == DMCOLLATE_TRUE;
+    devMode.scale = source.dmScale > 0 ? static_cast<int>(source.dmScale) : 100;
+    devMode.defaultSource =
+        nameForCode(static_cast<DWORD>(source.dmDefaultSource), getPaperSourceMap());
+    devMode.defaultSourceCode = static_cast<int>(source.dmDefaultSource);
+    devMode.resolutionX = 0;
+    devMode.resolutionY = 0;
+
+    // A negative dmPrintQuality is one of the DMRES_* names, a positive one is
+    // the horizontal resolution in dots per inch.
+    if (source.dmPrintQuality < 0)
+    {
+        switch (source.dmPrintQuality)
+        {
+        case DMRES_DRAFT:
+            devMode.printQuality = DRAFT;
+            break;
+        case DMRES_LOW:
+            devMode.printQuality = LOW;
+            break;
+        case DMRES_HIGH:
+            devMode.printQuality = HIGH;
+            break;
+        default:
+            devMode.printQuality = MEDIUM;
+            break;
+        }
+    }
+    else if (source.dmPrintQuality > 0)
+    {
+        devMode.printQuality = MEDIUM;
+        devMode.resolutionX = static_cast<int>(source.dmPrintQuality);
+        devMode.resolutionY = source.dmYResolution > 0 ? static_cast<int>(source.dmYResolution)
+                                                      : devMode.resolutionX;
+    }
 
     return std::string();
 }
 
-Orientation getOrientationType(SHORT orientation)
+std::string WinPrinterManager::getPrinterDriverOptions(
+    const PrinterName &name, std::map<std::string, std::map<std::string, bool> > &options)
 {
-    if (orientation == DMORIENT_LANDSCAPE)
+    options.clear();
+
+    std::wstring wideName = utf8ToWide(name);
+    if (wideName.empty())
     {
-        return Orientation::LANDSCAPE;
+        return "printer name must not be empty";
     }
 
-    return Orientation::PORTRAIT;
-}
-
-Duplex getDuplexType(SHORT duplex)
-{
-    if (duplex == DMDUP_SIMPLEX)
+    PrinterHandle handle;
+    if (!handle.open(wideName))
     {
-        return Duplex::SIMPLEX;
-    }
-    if (duplex == DMDUP_VERTICAL)
-    {
-        return Duplex::VERTICAL;
-    }
-    if (duplex == DMDUP_HORIZONTAL)
-    {
-        return Duplex::HORIZONTAL;
+        DWORD code = GetLastError();
+        return errorWithCode("OpenPrinterW(\"" + name + "\") failed", code);
     }
 
-    return Duplex::SIMPLEX;
-}
+    std::vector<PRINTER_ENUM_VALUESW> values;
+    DWORD count = 0;
+    DWORD errorCode = 0;
+    HANDLE printerHandle = handle.get();
+    auto enumerate = [printerHandle](LPBYTE data, DWORD capacity, LPDWORD needed,
+                                     LPDWORD returned) -> BOOL {
+        return EnumPrinterDataExW(printerHandle, L"PrinterDriverData", data, capacity, needed,
+                                  returned);
+    };
 
-Color getColorType(SHORT color)
-{
-    if (color == DMCOLOR_COLOR)
+    // Best effort by design: a driver that exposes nothing (or an SDK whose
+    // spooler cannot enumerate the key) yields an empty map and no error.
+    EnumerationResult result = growingEnumerate(values, count, enumerate, errorCode);
+    if (result != ENUMERATION_OK)
     {
-        return Color::COLOR;
+        return std::string();
     }
-    if (color == DMCOLOR_MONOCHROME)
+
+    for (DWORD i = 0; i < count; ++i)
     {
-        return Color::MONOCHROME;
-    }
-
-    return Color::MONOCHROME;
-}
-
-PrintQuality getPrintQualityType(DWORD printQuality)
-{
-
-    switch (printQuality)
-    {
-    case DMRES_DRAFT:
-        return PrintQuality::DRAFT;
-    case DMRES_LOW:
-        return PrintQuality::LOW;
-    case DMRES_MEDIUM:
-        return PrintQuality::MEDIUM;
-    case DMRES_HIGH:
-        return PrintQuality::HIGH;
-    default:
-        return PrintQuality::DRAFT;
-    }
-    return PrintQuality::DRAFT;
-}
-
-std::string getPrinterSource(DWORD defaultSource)
-{
-    switch (defaultSource)
-    {
-    case DMBIN_UPPER:
-        return "UPPER";
-    case DMBIN_LOWER:
-        return "LOWER";
-    case DMBIN_MIDDLE:
-        return "MIDDLE";
-    case DMBIN_MANUAL:
-        return "MANUAL";
-    case DMBIN_ENVELOPE:
-        return "ENVELOPE";
-    case DMBIN_ENVMANUAL:
-        return "ENVMANUAL";
-    case DMBIN_AUTO:
-        return "AUTO";
-    case DMBIN_TRACTOR:
-        return "TRACTOR";
-    case DMBIN_SMALLFMT:
-        return "SMALLFMT";
-    case DMBIN_LARGEFMT:
-        return "LARGEFMT";
-    case DMBIN_LARGECAPACITY:
-        return "LARGECAPACITY";
-    case DMBIN_CASSETTE:
-        return "CASSETTE";
-    case DMBIN_FORMSOURCE:
-        return "FORMSOURCE";
-    case DMBIN_USER:
-        return "USER";
-    default:
-        return "UNKNOWN";
-    }
-}
-
-std::vector<std::string> getStatusArray(DWORD status)
-{
-    std::vector<std::string> result;
-
-    for (const auto &statusMap : getStatusMap())
-    {
-        if (status & statusMap.second)
+        const std::string valueName = wideBufferToUtf8(values[i].pValueName,
+                                                       values[i].cbValueName);
+        if (valueName.empty())
         {
-            result.push_back(statusMap.first);
+            continue;
+        }
+        options[valueName][printerDataValueToString(values[i])] = true;
+    }
+    return std::string();
+}
+
+
+/** Jobs of a single queue; ENUMERATION_EMPTY is not an error. */
+std::string collectJobsForPrinter(const std::string &printerName, bool includeCompleted,
+                                 std::vector<JobInfo> &jobs)
+{
+    std::wstring wideName = utf8ToWide(printerName);
+    if (wideName.empty())
+    {
+        return "printer name must not be empty";
+    }
+
+    PrinterHandle handle;
+    if (!handle.open(wideName))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("OpenPrinterW(\"" + printerName + "\") failed", code);
+    }
+    HANDLE printerHandle = handle.get();
+
+    std::vector<JOB_INFO_2W> level2;
+    DWORD count = 0;
+    DWORD errorCode = 0;
+    auto enumerate2 = [printerHandle](LPBYTE data, DWORD capacity, LPDWORD needed,
+                                      LPDWORD returned) -> BOOL {
+        return EnumJobsW(printerHandle, 0, 0xFFFFFFFF, 2, data, capacity, needed, returned);
+    };
+    EnumerationResult result = growingEnumerate(level2, count, enumerate2, errorCode);
+    if (result == ENUMERATION_OK)
+    {
+        for (DWORD i = 0; i < count; ++i)
+        {
+            JobInfo job;
+            fillJobInfo(level2[i], printerName, job);
+            if (includeCompleted || !isFinishedJob(level2[i].Status))
+            {
+                jobs.push_back(job);
+            }
+        }
+        return std::string();
+    }
+    if (result == ENUMERATION_EMPTY)
+    {
+        return std::string();
+    }
+
+    // Some drivers only implement level 1; it is still better than nothing.
+    std::vector<JOB_INFO_1W> level1;
+    DWORD count1 = 0;
+    DWORD errorCode1 = 0;
+    auto enumerate1 = [printerHandle](LPBYTE data, DWORD capacity, LPDWORD needed,
+                                      LPDWORD returned) -> BOOL {
+        return EnumJobsW(printerHandle, 0, 0xFFFFFFFF, 1, data, capacity, needed, returned);
+    };
+    if (growingEnumerate(level1, count1, enumerate1, errorCode1) == ENUMERATION_OK)
+    {
+        for (DWORD i = 0; i < count1; ++i)
+        {
+            JobInfo job;
+            fillJobInfo(level1[i], printerName, job);
+            if (includeCompleted || !isFinishedJob(level1[i].Status))
+            {
+                jobs.push_back(job);
+            }
+        }
+        return std::string();
+    }
+
+    return errorWithCode("EnumJobsW failed for printer \"" + printerName + "\"", errorCode);
+}
+
+std::string WinPrinterManager::getJobs(const PrinterName &name, bool includeCompleted,
+                                       std::vector<JobInfo> &jobs)
+{
+    jobs.clear();
+
+    if (!name.empty())
+    {
+        return collectJobsForPrinter(name, includeCompleted, jobs);
+    }
+
+    // Every queue: one unreachable network printer must not fail the whole call,
+    // so queues that cannot be opened are skipped.
+    std::vector<PRINTER_INFO_2W> buffer;
+    DWORD count = 0;
+    DWORD errorCode = 0;
+    auto enumerate = [](LPBYTE data, DWORD capacity, LPDWORD needed, LPDWORD returned) -> BOOL {
+        return EnumPrintersW(PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS, NULL, 2, data, capacity,
+                             needed, returned);
+    };
+
+    EnumerationResult result = growingEnumerate(buffer, count, enumerate, errorCode);
+    if (result == ENUMERATION_FAILED)
+    {
+        return errorWithCode("EnumPrintersW failed while collecting the jobs of every queue",
+                             errorCode);
+    }
+    if (result == ENUMERATION_EMPTY)
+    {
+        return std::string();
+    }
+
+    for (DWORD i = 0; i < count; ++i)
+    {
+        collectJobsForPrinter(wideToUtf8(buffer[i].pPrinterName), includeCompleted, jobs);
+    }
+    return std::string();
+}
+
+std::string WinPrinterManager::getOneJob(const PrinterName &name, int jobId, JobInfo &job)
+{
+    if (jobId < 0)
+    {
+        return "invalid job id " + std::to_string(jobId);
+    }
+
+    std::wstring wideName = utf8ToWide(name);
+    if (wideName.empty())
+    {
+        return "printer name must not be empty";
+    }
+
+    PrinterHandle handle;
+    if (!handle.open(wideName))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("OpenPrinterW(\"" + name + "\") failed", code);
+    }
+
+    const DWORD wantedId = static_cast<DWORD>(jobId);
+    HANDLE printerHandle = handle.get();
+    std::vector<JOB_INFO_1W> buffer;
+    DWORD count = 0;
+    DWORD errorCode = 0;
+    auto query = [printerHandle, wantedId](LPBYTE data, DWORD capacity, LPDWORD needed,
+                                           LPDWORD returned) -> BOOL {
+        BOOL ok = GetJobW(printerHandle, wantedId, 1, data, capacity, needed);
+        if (ok && returned != NULL)
+        {
+            *returned = 1; // GetJobW reports no entry count
+        }
+        return ok;
+    };
+
+    EnumerationResult result = growingEnumerate(buffer, count, query, errorCode);
+    if (result == ENUMERATION_OK && count > 0)
+    {
+        fillJobInfo(buffer[0], name, job);
+        return std::string();
+    }
+    if (result == ENUMERATION_FAILED)
+    {
+        return errorWithCode("GetJobW(" + std::to_string(jobId) + ") failed on printer \"" + name +
+                                 "\"",
+                             errorCode);
+    }
+
+    return "job " + std::to_string(jobId) + " was not found on printer \"" + name + "\"";
+}
+
+std::string WinPrinterManager::setJob(const PrinterName &name, int jobId,
+                                      const std::string &command, bool &done)
+{
+    done = false;
+
+    if (jobId < 0)
+    {
+        return "invalid job id " + std::to_string(jobId);
+    }
+
+    const std::string normalised = normaliseJobCommand(command);
+    DWORD control = 0;
+    if (normalised.empty() || !resolveJobCommand(normalised, control))
+    {
+        return unsupportedJobCommandError(command);
+    }
+
+    std::wstring wideName = utf8ToWide(name);
+    if (wideName.empty())
+    {
+        return "printer name must not be empty";
+    }
+
+    PrinterHandle handle;
+    if (!handle.open(wideName))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("OpenPrinterW(\"" + name + "\") failed", code);
+    }
+
+    if (!SetJobW(handle.get(), static_cast<DWORD>(jobId), 0, NULL, control))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("SetJobW(" + normalised + ") failed on job " + std::to_string(jobId) +
+                                 " of printer \"" + name + "\"",
+                             code);
+    }
+
+    done = true;
+    return std::string();
+}
+
+std::string WinPrinterManager::printDirect(const PrinterName &name, const std::string &docName,
+                                           const std::string &type, const std::string &data,
+                                           int &jobId)
+{
+    jobId = 0;
+
+    const std::string upperType = toUpperAscii(type);
+    if (!isSupportedPrintFormat(upperType))
+    {
+        return unsupportedPrintFormatError(type);
+    }
+    if (data.empty())
+    {
+        return "empty document";
+    }
+
+    std::wstring wideName = utf8ToWide(name);
+    if (wideName.empty())
+    {
+        return "printer name must not be empty";
+    }
+
+    PrinterHandle handle;
+    if (!handle.open(wideName))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("OpenPrinterW(\"" + name + "\") failed", code);
+    }
+
+    const std::wstring wideDocumentName = utf8ToWide(docName.empty() ? std::string("print job") : docName);
+    SpoolJobWriter writer;
+    writer.attach(handle.get());
+
+    if (!writer.startDocument(wideDocumentName, utf8ToWide(upperType)))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("StartDocPrinterW failed on printer \"" + name + "\"", code);
+    }
+    if (!writer.startPage())
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("StartPagePrinter failed on printer \"" + name + "\"", code);
+    }
+
+    std::string writeError;
+    if (!writer.writeChunked(data.data(), data.size(), writeError))
+    {
+        return writeError;
+    }
+
+    if (!writer.endPage())
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("EndPagePrinter failed on printer \"" + name + "\"", code);
+    }
+    if (!writer.endDocument())
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("EndDocPrinter failed on printer \"" + name + "\"", code);
+    }
+
+    jobId = static_cast<int>(writer.jobId());
+    return std::string();
+}
+
+std::string WinPrinterManager::printFile(const PrinterName &name, const std::string &docName,
+                                         const std::string &type, const std::string &filename,
+                                         int &jobId)
+{
+    jobId = 0;
+
+    const std::string upperType = toUpperAscii(type);
+    if (!isSupportedPrintFormat(upperType))
+    {
+        return unsupportedPrintFormatError(type);
+    }
+
+    std::wstring wideName = utf8ToWide(name);
+    if (wideName.empty())
+    {
+        return "printer name must not be empty";
+    }
+
+    const std::wstring wideFilename = utf8ToWide(filename);
+    if (wideFilename.empty())
+    {
+        return "file name must not be empty";
+    }
+
+    const DWORD attributes = GetFileAttributesW(wideFilename.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("file \"" + filename + "\" does not exist or cannot be read", code);
+    }
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        return "file \"" + filename + "\" is a directory";
+    }
+
+    // Opened through std::filesystem so that the UTF-8 path reaches Win32 as UTF-16.
+    std::ifstream file(std::filesystem::u8path(filename).c_str(), std::ios::in | std::ios::binary);
+    if (!file.is_open())
+    {
+        return "cannot open file \"" + filename + "\" for reading";
+    }
+
+    PrinterHandle handle;
+    if (!handle.open(wideName))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("OpenPrinterW(\"" + name + "\") failed", code);
+    }
+
+    const std::wstring wideDocumentName =
+        utf8ToWide(docName.empty() ? std::string("print job") : docName);
+    SpoolJobWriter writer;
+    writer.attach(handle.get());
+
+    if (!writer.startDocument(wideDocumentName, utf8ToWide(upperType)))
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("StartDocPrinterW failed on printer \"" + name + "\"", code);
+    }
+    if (!writer.startPage())
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("StartPagePrinter failed on printer \"" + name + "\"", code);
+    }
+
+    std::vector<char> buffer(1024 * 1024);
+    for (;;)
+    {
+        file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize read = file.gcount();
+        if (read > 0)
+        {
+            std::string writeError;
+            if (!writer.writeChunked(buffer.data(), static_cast<size_t>(read), writeError))
+            {
+                return writeError;
+            }
+        }
+        if (read < static_cast<std::streamsize>(buffer.size()))
+        {
+            break; // end of file, or a read error reported below
         }
     }
 
-    return result;
+    if (file.bad())
+    {
+        return "failed while reading \"" + filename + "\"";
+    }
+
+    if (!writer.endPage())
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("EndPagePrinter failed on printer \"" + name + "\"", code);
+    }
+    if (!writer.endDocument())
+    {
+        DWORD code = GetLastError();
+        return errorWithCode("EndDocPrinter failed on printer \"" + name + "\"", code);
+    }
+
+    jobId = static_cast<int>(writer.jobId());
+    return std::string();
 }
 
-// * ___________________________________________________________________________
-// *
-// *                        PrinterManager Implementation
-// * ___________________________________________________________________________
-
-ErrorMessage *PrinterManager::getDefaultPrinterName(PrinterName &printerName)
+std::vector<std::string> WinPrinterManager::getSupportedPrintFormats()
 {
-    DWORD cSize = 0;
-    GetDefaultPrinterW(NULL, &cSize);
-
-    if (cSize == 0)
-    {
-        static ErrorMessage errorMsg = "Error could not get default printer name";
-        return &errorMsg;
-    }
-
-    MemValue<uint16_t> bPrinterName(cSize * sizeof(uint16_t));
-
-    if (bPrinterName == NULL)
-    {
-        static ErrorMessage errorMsg = "Error on allocating memory for printer name";
-        return &errorMsg;
-    }
-
-    BOOL res = GetDefaultPrinterW((LPWSTR)(bPrinterName.get()), &cSize);
-
-    if (!res)
-    {
-        static ErrorMessage errorMsg = "Error on GetDefaultPrinterW";
-        return &errorMsg;
-    }
-
-    std::string result = LPWSTRToString(reinterpret_cast<const wchar_t *>(bPrinterName.get()));
-    printerName = std::wstring(result.begin(), result.end());
-
-    return NULL;
+    return winSupportedPrintFormats();
 }
 
-ErrorMessage *PrinterManager::getOneJob(PrinterName name, int jobId, JobInfo &jobInfo)
+std::vector<std::string> WinPrinterManager::getSupportedJobCommands()
 {
-
-    PrinterHandle printerHandle((LPWSTR)name.c_str());
-
-    if (!printerHandle)
-    {
-        static ErrorMessage errorMsg = "Could not open printer ";
-        return &errorMsg;
-    }
-
-    DWORD sizeBytes = 0, dummyBytes = 0;
-    GetJobW(*printerHandle, static_cast<DWORD>(jobId), 2, NULL, sizeBytes, &sizeBytes);
-    MemValue<JOB_INFO_2W> job(sizeBytes);
-
-    if (!job)
-    {
-        static ErrorMessage errorMsg = "Error on allocating memory for printers";
-        return &errorMsg;
-    }
-
-    BOOL bOK = GetJobW(*printerHandle, static_cast<DWORD>(jobId), 2, (LPBYTE)job.get(), sizeBytes, &dummyBytes);
-    if (!bOK)
-    {
-        static ErrorMessage errorMsg = "Error on GetJob. Wrong job id or it was deleted";
-        return &errorMsg;
-    }
-    // pStatus
-    // A pointer to a null-terminated string that specifies the status of the print job.
-    // This member should be checked prior to Status and, if pStatus is NULL, the status is defined by the contents of the Status member.
-
-    std::vector<std::string> statusArray;
-
-    if (job->pStatus == NULL)
-    {
-        statusArray = getStatusArray(job->Status);
-    }
-
-    jobInfo.name = LPWSTRToString(job->pPrinterName);
-    jobInfo.user = LPWSTRToString(job->pUserName);
-    jobInfo.priority = job->Priority;
-    jobInfo.size = job->Size;
-    jobInfo.status = LPWSTRToString(job->pStatus);
-    jobInfo.statusArray = statusArray;
-    jobInfo.position = job->Position;
-    jobInfo.totalPages = job->TotalPages;
-    jobInfo.pagesPrinted = job->PagesPrinted;
-
-    return NULL;
+    return allJobCommands();
 }
 
-std::vector<std::string> getAttributeArray(DWORD attributes)
+} // namespace
+
+PrinterManager *createPrinterManager()
 {
-    std::vector<std::string> result;
-
-    for (const auto &attributeMap : getAttributeMap())
-    {
-        if (attributes & attributeMap.second)
-        {
-            result.push_back(attributeMap.first);
-        }
-    }
-
-    return result;
+    return new WinPrinterManager();
 }
 
-void ParsePrinterObject(PRINTER_INFO_2W *printer, PrinterInfo &printerInfo)
-{
-    printerInfo.name = LPWSTRToString(printer->pPrinterName);
-    printerInfo.server = LPWSTRToString(printer->pServerName);
-    printerInfo.shareName = LPWSTRToString(printer->pShareName);
-    printerInfo.portName = LPWSTRToString(printer->pPortName);
-    printerInfo.driverName = LPWSTRToString(printer->pDriverName);
-    printerInfo.location = LPWSTRToString(printer->pLocation);
-    printerInfo.comment = LPWSTRToString(printer->pComment);
-    printerInfo.status = printer->Status;
-    printerInfo.statusArray = getStatusArray(printer->Status);
-    printerInfo.attributes = printer->Attributes;
-    printerInfo.attributeArray = getAttributeArray(printer->Attributes);
-    printerInfo.averagePPM = printer->AveragePPM;
-    printerInfo.cJobs = printer->cJobs;
-    printerInfo.defaultPriority = printer->DefaultPriority;
-    printerInfo.startTime = printer->StartTime;
-    printerInfo.untilTime = printer->UntilTime;
-}
-
-ErrorMessage *PrinterManager::getOnePrinter(PrinterName name, PrinterInfo &printerInfo)
-{
-
-    PrinterHandle printerHandle((LPWSTR)name.c_str());
-
-    if (!printerHandle)
-    {
-        static ErrorMessage errorMsg = "Could not open printer";
-        return &errorMsg;
-    }
-
-    DWORD sizeBytes = 0, dummyBytes = 0;
-    GetPrinterW(printerHandle, 2, NULL, 0, &sizeBytes);
-
-    MemValue<PRINTER_INFO_2W> printer(sizeBytes);
-    if (!printer)
-    {
-
-        static ErrorMessage errorMsg = "Error on allocating memory for printer info";
-        return &errorMsg;
-    }
-
-    BOOL bOK = GetPrinterW(printerHandle, 2, (LPBYTE)printer.get(), sizeBytes, &dummyBytes);
-    if (!bOK)
-    {
-        static ErrorMessage errorMsg = "Error on GetPrinter. Wrong printer name or it was deleted";
-        return &errorMsg;
-    }
-
-    ParsePrinterObject(printer.get(), printerInfo);
-
-    return NULL;
-}
-
-ErrorMessage *PrinterManager::getPrinters(std::vector<PrinterInfo> &printersInfo)
-{
-
-    DWORD printers_size = 0;
-    DWORD printers_size_bytes = 0, dummyBytes = 0;
-    DWORD flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
-
-    // Get required buffer size
-    EnumPrintersW(flags, NULL, 2, NULL, 0, &printers_size_bytes, &printers_size);
-
-    MemValue<PRINTER_INFO_2W> printers(printers_size_bytes);
-    if (!printers)
-    {
-        static ErrorMessage errorMsg = "Failed to allocate memory for printers";
-        return &errorMsg;
-    }
-
-    BOOL bError = EnumPrintersW(flags, NULL, 2, (LPBYTE)(printers.get()),
-                                printers_size_bytes, &dummyBytes, &printers_size);
-
-    if (!bError)
-    {
-        static ErrorMessage errorMsg = "EnumPrinters Error ";
-        return &errorMsg;
-    }
-
-    PRINTER_INFO_2W *printer = printers.get();
-
-    for (DWORD i = 0; i < printers_size; ++i, ++printer)
-    {
-        PrinterInfo printerInfo;
-        ParsePrinterObject(printer, printerInfo);
-        printersInfo.push_back(printerInfo);
-    }
-
-    return NULL;
-}
-
-ErrorMessage *PrinterManager::printDirect(PrinterName name, std::string docName, std::string type, std::string data, int &jobId)
-{
-
-    PrinterHandle printerHandle((LPWSTR)name.c_str());
-
-    if (!printerHandle)
-    {
-        static ErrorMessage errorMsg = "Could not open printer ";
-        return &errorMsg;
-    }
-
-    std::wstring docNameWide(docName.begin(), docName.end());
-    std::wstring typeWide(type.begin(), type.end());
-
-    DOC_INFO_1W DocInfo;
-    DocInfo.pDocName = (LPWSTR)docNameWide.c_str();
-    DocInfo.pOutputFile = NULL;
-    // RAW format: A data type consisting of PDL data that can be sent to a device without further processing.
-    // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rprn/e81cbc09-ab05-4a32-ae4a-8ec57b436c43#Appendix_A_211
-    DocInfo.pDatatype = (LPWSTR)typeWide.c_str();
-
-    jobId = StartDocPrinterW(*printerHandle, 1, (LPBYTE)&DocInfo);
-    if (jobId == 0)
-    {
-        static ErrorMessage errorMsg = "StartDocPrinter error: ";
-        return &errorMsg;
-    }
-
-    if (!StartPagePrinter(*printerHandle))
-    {
-        static ErrorMessage errorMsg = "StartPagePrinter error: ";
-        return &errorMsg;
-    }
-
-    DWORD bytesWritten = 0;
-    BOOL success = WritePrinter(*printerHandle, (LPVOID)data.c_str(),
-                                (DWORD)data.size(), &bytesWritten);
-
-    EndPagePrinter(*printerHandle);
-    EndDocPrinter(*printerHandle);
-
-    if (!success || bytesWritten != data.size())
-    {
-        static ErrorMessage errorMsg = "Failed to write all data to printer";
-        return &errorMsg;
-    }
-
-    return NULL;
-}
-
-ErrorMessage *PrinterManager::getSupportedPrintFormats(std::vector<std::string> &dataTypes)
-{
-
-    DWORD numBytes = 0, processorsNum = 0;
-
-    // Check the amount of bytes required
-    EnumPrintProcessorsW(NULL, NULL, 1, (LPBYTE)(NULL), numBytes, &numBytes, &processorsNum);
-    MemValue<_PRINTPROCESSOR_INFO_1W> processors(numBytes);
-
-    // Retrieve processors
-    BOOL isOK = EnumPrintProcessorsW(NULL, NULL, 1, (LPBYTE)(processors.get()), numBytes, &numBytes, &processorsNum);
-    if (!isOK)
-    {
-        static ErrorMessage errorMsg = "Error on EnumPrintProcessorsW";
-        return &errorMsg;
-    }
-
-    _PRINTPROCESSOR_INFO_1W *pProcessor = processors.get();
-    for (DWORD processor_i = 0; processor_i < processorsNum; ++processor_i, ++pProcessor)
-    {
-        numBytes = 0;
-        DWORD dataTypesNum = 0;
-        EnumPrintProcessorDatatypesW(NULL, pProcessor->pName, 1, (LPBYTE)(NULL), numBytes, &numBytes, &dataTypesNum);
-        MemValue<_DATATYPES_INFO_1W> dataTypesWin(numBytes);
-        isOK = EnumPrintProcessorDatatypesW(NULL, pProcessor->pName, 1, (LPBYTE)(dataTypesWin.get()), numBytes, &numBytes, &dataTypesNum);
-
-        if (!isOK)
-        {
-            static ErrorMessage errorMsg = "Error on EnumPrintProcessorDatatypesW";
-            return &errorMsg;
-        }
-
-        _DATATYPES_INFO_1W *pDataType = dataTypesWin.get();
-        for (DWORD j = 0; j < dataTypesNum; ++j, ++pDataType)
-        {
-            dataTypes.push_back(LPWSTRToString(pDataType->pName));
-        }
-    }
-
-    return NULL;
-}
-
-ErrorMessage *PrinterManager::getPrinterDevMode(const std::wstring &printerName, PrinterDevMode &pDevMode)
-{
-
-    PrinterHandle printerHandle((LPWSTR)printerName.c_str());
-
-    if (!printerHandle)
-    {
-        static ErrorMessage errorMsg = "Could not open printer ";
-        return &errorMsg;
-    }
-
-    // Get required buffer size
-    DWORD needed = 0;
-    GetPrinterW(printerHandle, 2, NULL, 0, &needed);
-    if (needed == 0)
-    {
-        static ErrorMessage errorMsg = "Failed to get printer info size";
-        return &errorMsg;
-    }
-
-    // Allocate memory for printer info
-    MemValue<PRINTER_INFO_2W> pInfo(needed);
-
-    if (!pInfo)
-    {
-        static ErrorMessage errorMsg = "Memory allocation failed";
-        return &errorMsg;
-    }
-    // Get printer info
-    if (!GetPrinterW(printerHandle, 2, (LPBYTE)pInfo.get(), needed, &needed))
-    {
-        static ErrorMessage errorMsg = "Failed to get printer info";
-        return &errorMsg;
-    }
-
-    if (pInfo->pDevMode == NULL)
-    {
-        static ErrorMessage errorMsg = "Failed to get printer info";
-        return &errorMsg;
-    }
-
-    pDevMode.deviceName = printerName;
-    pDevMode.paperSize = getPaperSizeName(pInfo->pDevMode->dmPaperSize);
-
-    // dmPaperSize This member must be zero if the length and width of the paper are specified by the dmPaperLength and dmPaperWidth members.
-    if (pInfo->pDevMode->dmPaperSize == 0)
-    {
-        pDevMode.paperSize = std::to_string(pInfo->pDevMode->dmPaperWidth) + " x " + std::to_string(pInfo->pDevMode->dmPaperLength);
-    }
-
-    pDevMode.orientation = getOrientationType(pInfo->pDevMode->dmOrientation);
-    pDevMode.duplex = getDuplexType(pInfo->pDevMode->dmDuplex);
-    pDevMode.color = getColorType(pInfo->pDevMode->dmColor);
-    pDevMode.copies = (int)pInfo->pDevMode->dmCopies;
-    pDevMode.defaultSource = getPrinterSource(pInfo->pDevMode->dmDefaultSource);
-    pDevMode.printQuality = getPrintQualityType(pInfo->pDevMode->dmPrintQuality);
-    pDevMode.scale = pInfo->pDevMode->dmScale;
-    pDevMode.collate = (pInfo->pDevMode->dmCollate == DMCOLLATE_TRUE);
-
-    return NULL;
-}
+#endif // _WIN32
