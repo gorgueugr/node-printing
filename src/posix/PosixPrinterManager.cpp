@@ -16,6 +16,7 @@
 #include <cups/ipp.h>
 #include <cups/ppd.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -137,6 +138,71 @@ std::string systemDefaultQueue()
     return name == NULL ? std::string() : std::string(name);
 }
 
+/** True when this process runs inside Windows Subsystem for Linux. */
+bool runningUnderWsl()
+{
+    if (getenv("WSL_DISTRO_NAME") != NULL || getenv("WSL_INTEROP") != NULL)
+    {
+        return true;
+    }
+
+    std::ifstream version("/proc/version");
+    if (version.is_open())
+    {
+        std::string line;
+        std::getline(version, line);
+        std::string lower = toLowerAscii(line);
+        if (lower.find("microsoft") != std::string::npos || lower.find("wsl") != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Reason of the last failed CUPS call, be it an IPP status or a system error. */
+std::string cupsErrorDetail()
+{
+    ipp_status_t status = cupsLastError();
+    if (status >= IPP_STATUS_ERROR_BAD_REQUEST)
+    {
+        return ippErrorString(status);
+    }
+
+    std::string message = cupsLastErrorString();
+    if (!message.empty())
+    {
+        return message; // a system error, for example "Bad file descriptor"
+    }
+    return "unknown CUPS error";
+}
+
+/**
+ * Message for a CUPS call that failed, with the hint that is actually useful:
+ * WSL cannot see the printers installed in Windows, and a Linux machine without
+ * cupsd has nothing to list.
+ */
+std::string cupsFailureMessage(const std::string &action)
+{
+    std::ostringstream stream;
+    stream << "cannot " << action << ": " << cupsErrorDetail();
+
+    const char *server = cupsServer();
+    stream << " (CUPS server \"" << (server != NULL && server[0] != '\0' ? server : "default") << "\")";
+
+    if (runningUnderWsl())
+    {
+        stream << ". This is the Linux build running inside WSL, so it talks to CUPS, which has no "
+                  "printers here: the printers installed in Windows are not visible from WSL. Run "
+                  "Node on Windows itself (PowerShell or cmd, not WSL) to manage them.";
+    }
+    else
+    {
+        stream << ". Check that a CUPS server is running (lpstat -r) and that CUPS_SERVER points at it.";
+    }
+    return stream.str();
+}
+
 /* ------------------------------------------------------------------ */
 /* RAII wrappers                                                      */
 /* ------------------------------------------------------------------ */
@@ -255,7 +321,7 @@ public:
     {
         if (_connection.value == NULL)
         {
-            _error = std::string("cannot connect to the CUPS server: ") + cupsLastErrorString();
+            _error = cupsFailureMessage("connect to the CUPS server");
         }
     }
 
@@ -1152,6 +1218,8 @@ public:
 private:
     std::string sendDocument(const PrinterName &name, const std::string &docName,
                              const std::string &type, ChunkSource &source, int &jobId);
+    std::string jobsOfQueue(const std::string &queue, bool includeCompleted,
+                            std::vector<JobInfo> &jobs);
     void fillPrinter(cups_dest_t *dest, PrinterInfo &printer);
 };
 
@@ -1197,10 +1265,19 @@ std::string PosixPrinterManager::getPrinters(std::vector<PrinterInfo> &printers)
 {
     DestList list;
     list.count = cupsGetDests2(CUPS_HTTP_DEFAULT, &list.dests);
-    if (list.dests == NULL)
+
+    // cupsGetDests2 returns 0 both when the request failed and when the machine
+    // simply has no queues; cupsLastError() tells the two apart. Asking for the
+    // destination list also asks for the default printer, so an empty spooler
+    // answers "not found", which is not a failure.
+    if (list.count <= 0)
     {
-        std::string message = cupsLastErrorString();
-        return message.empty() ? std::string("cannot list printers: unknown CUPS error") : message;
+        ipp_status_t status = cupsLastError();
+        if (status == IPP_STATUS_OK || status == IPP_STATUS_ERROR_NOT_FOUND)
+        {
+            return std::string();
+        }
+        return cupsFailureMessage("list printers");
     }
 
     std::string defaultQueue = systemDefaultQueue();
@@ -1229,8 +1306,7 @@ std::string PosixPrinterManager::getDefaultPrinterName(PrinterName &printerName)
             printerName.clear();
             return std::string();
         }
-        std::string message = cupsLastErrorString();
-        return message.empty() ? std::string("cannot read the default printer") : message;
+        return cupsFailureMessage("read the default printer");
     }
     printerName = name;
     return std::string();
@@ -1541,8 +1617,9 @@ std::string PosixPrinterManager::getPrinterDriverOptions(const PrinterName &name
     return std::string();
 }
 
-std::string PosixPrinterManager::getJobs(const PrinterName &name, bool includeCompleted,
-                                         std::vector<JobInfo> &jobs)
+/** Jobs of one queue; Get-Jobs always needs a printer-uri. */
+std::string PosixPrinterManager::jobsOfQueue(const std::string &queue, bool includeCompleted,
+                                             std::vector<JobInfo> &jobs)
 {
     IppClient client;
     if (!client.connected())
@@ -1551,14 +1628,9 @@ std::string PosixPrinterManager::getJobs(const PrinterName &name, bool includeCo
     }
 
     ipp_t *request = ippNewRequest(IPP_OP_GET_JOBS);
-    std::string resource = "/";
-    if (!name.empty())
-    {
-        std::string queue = queueName(name);
-        resource = "/printers/" + queue;
-        std::string uri = printerUri(queue);
-        ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri.c_str());
-    }
+    std::string resource = "/printers/" + queue;
+    std::string uri = printerUri(queue);
+    ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri.c_str());
     ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_KEYWORD, "which-jobs", NULL,
                  includeCompleted ? "all" : "not-completed");
     ippAddBoolean(request, IPP_TAG_OPERATION, "my-jobs", 0);
@@ -1579,6 +1651,48 @@ std::string PosixPrinterManager::getJobs(const PrinterName &name, bool includeCo
     }
     IppMessage message(response);
     parseJobs(response, jobs);
+    return std::string();
+}
+
+/**
+ * Jobs of the given queue, or of every queue when the name is empty.
+ *
+ * Get-Jobs requires a printer-uri, so an inventory of every queue asks each of
+ * them in turn (CUPS has a private CUPS-Get-Jobs operation for this, but it is
+ * not in the public headers). A queue that disappears or refuses to answer while
+ * that inventory runs is skipped instead of failing the whole listing.
+ */
+std::string PosixPrinterManager::getJobs(const PrinterName &name, bool includeCompleted,
+                                         std::vector<JobInfo> &jobs)
+{
+    if (!name.empty())
+    {
+        return jobsOfQueue(queueName(name), includeCompleted, jobs);
+    }
+
+    DestList list;
+    list.count = cupsGetDests2(CUPS_HTTP_DEFAULT, &list.dests);
+    if (list.count <= 0)
+    {
+        ipp_status_t status = cupsLastError();
+        if (status == IPP_STATUS_OK || status == IPP_STATUS_ERROR_NOT_FOUND)
+        {
+            return std::string(); // no queues, therefore no jobs
+        }
+        return cupsFailureMessage("list the print queues");
+    }
+
+    for (int i = 0; i < list.count; ++i)
+    {
+        const char *queue = list.dests[i].name;
+        if (queue == NULL || queue[0] == '\0')
+        {
+            continue;
+        }
+        std::vector<JobInfo> queueJobs;
+        std::string ignored = jobsOfQueue(queue, includeCompleted, queueJobs);
+        jobs.insert(jobs.end(), queueJobs.begin(), queueJobs.end());
+    }
     return std::string();
 }
 

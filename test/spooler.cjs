@@ -245,6 +245,13 @@ async function main() {
   const fetched = printing.getJob(testPrinter, jobId);
   equal('getJob() returns the same job', fetched.id, jobId);
 
+  // Listing every queue at once is a documented call: getJobs() without a name.
+  const allJobs = printing.getJobs(true);
+  ok(
+    'getJobs() without a queue lists the jobs of every queue',
+    Array.isArray(allJobs) && allJobs.some((entry) => entry.id === jobId)
+  );
+
   assert.throws(
     () => printing.getJob(testPrinter, 987654321),
     /not[- ]found|no such|unknown|does not exist/i,

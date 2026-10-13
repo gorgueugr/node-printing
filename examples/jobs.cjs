@@ -42,7 +42,14 @@ if (cancelAllIndex !== -1) {
   process.exit(0);
 }
 
-const jobs = printing.getJobs(undefined, true);
+const jobs = (() => {
+  try {
+    return printing.getJobs(undefined, true);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+})();
 console.log(jobs.length + ' job(s) known to the spooler:');
 for (const job of jobs) {
   console.log(describe(job));
