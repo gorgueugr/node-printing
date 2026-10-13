@@ -3,58 +3,81 @@
         {
             "target_name": "nodeprinting",
             "sources": [
-                "src/node_printer.hpp",
-                "src/PrinterManager.hpp",
                 "src/node_printer.cpp",
                 "src/win/WinPrinterManager.cpp",
-                "src/posix/PosixPrinterManager.cpp",
+                "src/posix/PosixPrinterManager.cpp"
             ],
-            "include_dirs": ["<!(node -p \"require('node-addon-api').include\")"],
+            "include_dirs": [
+                "<!(node -p \"require('node-addon-api').include_dir\")"
+            ],
             "dependencies": [
-                "<!(node -p \"require('node-addon-api').targets\"):node_addon_api"
+                "<!(node -p \"require('node-addon-api').targets\"):node_addon_api_except"
+            ],
+            "defines": [
+                "NAPI_VERSION=8",
+                "NAPI_CPP_EXCEPTIONS"
             ],
             "conditions": [
                 [
-                    'OS=="win"',
+                    "OS==\"win\"",
                     {
-                        "libraries": ["-lwinspool.lib"],
-                        "sources/": [["exclude", "src/posix/PosixPrinterManager.cpp"]],
-                    },
+                        "libraries": [
+                            "Winspool.lib",
+                            "Gdi32.lib"
+                        ],
+                        "sources/": [
+                            [
+                                "exclude",
+                                "src/posix/PosixPrinterManager.cpp"
+                            ]
+                        ],
+                        "msvs_settings": {
+                            "VCCLCompilerTool": {
+                                "AdditionalOptions": [
+                                    "/utf-8"
+                                ],
+                                "ExceptionHandling": 1,
+                                "WarningLevel": 3,
+                                "Optimization": 2,
+                                "RuntimeLibrary": 0
+                            }
+                        }
+                    }
                 ],
                 [
-                    'OS=="linux"',
+                    "OS!=\"win\"",
                     {
-                        "include_dirs": ["/usr/include", "/usr/include/cups"],
-                        "libraries": [
-                            "-lcups",
-                        ],
-                        "sources/": [["exclude", "src/win/WinPrinterManager.cpp"]],
-                    },
-                ],
-                [
-                    'OS!="win"',
-                    {
-                        "cflags": ["<!(cups-config --cflags)"],
-                        "ldflags": [
-                            "<!(cups-config --libs)"
-                            #'-lcups -lgssapi_krb5 -lkrb5 -lk5crypto -lcom_err -lz -lpthread -lm -lcrypt -lz'
+                        "include_dirs": [
+                            "<!@(cups-config --cflags)"
                         ],
                         "libraries": [
-                            "<!(cups-config --libs)"
-                            #'-lcups -lgssapi_krb5 -lkrb5 -lk5crypto -lcom_err -lz -lpthread -lm -lcrypt -lz'
+                            "<!@(cups-config --libs)"
                         ],
-                        "link_settings": {"libraries": ["<!(cups-config --libs)"]},
-                    },
-                ],
-            ],
-            "cflags!": ["-fno-exceptions"],
-            "cflags_cc!": ["-fno-exceptions"],
-            "xcode_settings": {
-                "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
-                "CLANG_CXX_LIBRARY": "libc++",
-                "MACOSX_DEPLOYMENT_TARGET": "10.7",
-            },
-            "msvs_settings": {"VCCLCompilerTool": {"ExceptionHandling": 1}},
+                        "cflags": [
+                            "-Wall"
+                        ],
+                        "cflags_cc": [
+                            "-std=c++17",
+                            "-Wall"
+                        ],
+                        "cflags_cc!": [
+                            "-fno-exceptions"
+                        ],
+                        "sources/": [
+                            [
+                                "exclude",
+                                "src/win/WinPrinterManager.cpp"
+                            ]
+                        ],
+                        "xcode_settings": {
+                            "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+                            "CLANG_CXX_LIBRARY": "libc++",
+                            "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
+                            "MACOSX_DEPLOYMENT_TARGET": "10.15"
+                        }
+                    }
+                ]
+            ]
         }
     ]
 }
