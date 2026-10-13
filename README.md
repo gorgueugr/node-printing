@@ -67,6 +67,23 @@ npm run rebuild
 `node-gyp` is the build tool; it is a devDependency of this package, so no global
 installation is required.
 
+### Windows, WSL and the Linux build
+
+The addon talks to the spooler of the platform it was built for: Winspool on
+Windows, CUPS on Linux and macOS. Two consequences are worth knowing:
+
+- **Native addons are not portable.** A build made inside WSL is a Linux binary
+  and Windows Node cannot load it (and the other way round). Rebuild where the
+  code will run with `npm run rebuild`; `lib/binding.cjs` inspects the binary and
+  tells you when it belongs to another operating system instead of failing with a
+  loader error.
+- **WSL sees no Windows printers.** Node inside WSL uses the Linux build, so it
+  talks to CUPS, and the printers installed in Windows are not there: you get an
+  empty list, and an error message saying exactly that when no CUPS server is
+  running. To manage the Windows printers, run Node on Windows itself
+  (PowerShell or cmd). Exposing them to WSL would mean running a CUPS server
+  inside the distribution, which is outside this package.
+
 ## Quick start
 
 ```js
@@ -339,6 +356,11 @@ The 1.x API only worked on Windows and returned partially filled objects. The
   only fills for printed or complete jobs; `printerState`/`jobState` fall back to
   `unknown` for status bits outside the documented groups, while the raw names
   still appear in `statusArray`.
+- A machine without any configured queue is not an error: `getPrinters()`
+  returns `[]` and `getDefaultPrinter()` returns `null`.
+- `getJobs()` without a queue name asks every queue in turn (the IPP `Get-Jobs`
+  operation requires a `printer-uri`), so on a server with many queues it is one
+  request per queue; a queue that disappears meanwhile is skipped.
 - The addon has no prebuilt binaries: it compiles on install, so a toolchain is
   required on the target machine.
 

@@ -12,7 +12,13 @@
 const printing = require('..');
 
 const requested = process.argv[2];
-const printers = requested ? [printing.getPrinter(requested)] : printing.getPrinters();
+let printers;
+try {
+  printers = requested ? [printing.getPrinter(requested)] : printing.getPrinters();
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
 
 for (const printer of printers) {
   console.log('=== ' + printer.name + ' (' + printer.state + ') ===');

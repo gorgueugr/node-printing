@@ -9,9 +9,18 @@
 
 const printing = require('..');
 
-const printers = printing.getPrinters();
+let printers;
+let defaultPrinterName = '';
+try {
+  defaultPrinterName = printing.getDefaultPrinterName();
+  printers = printing.getPrinters();
+} catch (error) {
+  // The message says what is missing: no CUPS server, wrong platform build...
+  console.error(error.message);
+  process.exit(1);
+}
 
-console.log('default printer: ' + (printing.getDefaultPrinterName() || '(none)'));
+console.log('default printer: ' + (defaultPrinterName || '(none)'));
 console.log(printers.length + ' queue(s):');
 
 for (const printer of printers) {
